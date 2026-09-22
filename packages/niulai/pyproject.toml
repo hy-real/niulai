@@ -1,0 +1,36 @@
+[project]
+name = "niulai"
+version = "0.1.0"
+description = "本地优先的 A 股 AI 助手内核：手写 ReAct loop + 工具系统 + 可插拔数据源"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["agent", "llm", "a-share", "local-first"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+]
+
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# akshare 只作为长尾数据源兜底（宏观 / 基金 / 龙虎榜），默认不装：
+# 它会拖入 pandas / numpy，桌面打包体积会从几十 MB 涨到 100MB+。
+longtail = ["akshare>=1.14"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+niulai = "niulai.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/niulai"]

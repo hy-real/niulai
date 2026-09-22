@@ -1,0 +1,26 @@
+[project]
+name = "niulai-mcp"
+version = "0.1.0"
+description = "把 Niulai 的 A 股数据源暴露成 MCP server，供 Claude Code / Cursor 等客户端接入"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["mcp", "model-context-protocol", "a-share", "stock"]
+
+dependencies = [
+    "niulai",
+    "mcp>=1.0",
+]
+
+[project.scripts]
+niulai-mcp = "niulai_mcp.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/niulai_mcp"]
+
+[tool.uv.sources]
+niulai = { workspace = true }

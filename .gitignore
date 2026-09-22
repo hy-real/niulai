@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.workbuddy/
+
+# 工具缓存
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# 本地数据与密钥
+.env
+.env.*
+*.local.toml
+
+# 运行轨迹（examples/ 下的示例轨迹需要保留）
+traces/
+*.jsonl
+!examples/*.jsonl
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 前端（P5 之后）
+node_modules/
+apps/desktop/dist/
+
+# 本地工具产物（与代码无关，不进版本库）
+# .workbuddy/ 存的是项目记忆与工作日志，只在本地保留。
+# 注意：不要删这个目录，它是有用的项目数据，只是不该被 git 跟踪。
+.workbuddy/
+.tmp*/

@@ -1,0 +1,209 @@
+"""数据源抽象。
+
+核心约束：**工具不认识具体数据源。**
+
+工具只调 `MarketDataService`，Service 按 capability 挑源。
+于是"换数据源"= 加一个实现类 + 改一行配置，而不是去动工具代码。
+
+字段单位约定（贯穿全项目，别在某一层偷偷换算）：
+价格 = 元，成交量 = 手，成交额 = 元，比率 = 百分数（`-0.36` 表示 -0.36%）。
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from typing import Any, Literal, Protocol, runtime_checkable
+
+Capability = Literal["quote", "kline", "financial", "moneyflow", "sector"]
+
+
+# ---------------------------------------------------------------- 格式化辅助
+
+
+def _money(value: float | None) -> str:
+    return "—" if value is None else f"{value:.2f}"
+
+
+def _pct(value: float | None) -> str:
+    return "—" if value is None else f"{value:+.2f}%"
+
+
+def _yi(value: float | None) -> str:
+    """元 → 亿元。金融数据里"亿"比"元"好读，也短得多。"""
+    return "—" if value is None else f"{value / 1e8:,.2f} 亿"
+
+
+@dataclass(slots=True)
+class Quote:
+    """单只标的的行情快照。"""
+
+    symbol: str  # 规整后的 6 位代码，如 600519
+    name: str
+    price: float
+    prev_close: float | None = None
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    volume: float | None = None
+    amount: float | None = None
+    source: str = ""
+    as_of: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def render(self) -> str:
+        """转成给**模型**看的紧凑文本。
+
+        注意这不是最终给用户的文案 —— 模型会拿它再组织语言。
+        所以这里追求"信息完整、无歧义"，不追求好看。
+        """
+        change_text = "—" if self.change is None else f"{self.change:+.2f}"
+
+        lines = [
+            f"{self.name}（{self.symbol}）",
+            f"最新价：{_money(self.price)}",
+            f"涨跌：{change_text}（{_pct(self.change_pct)}）",
+            "今开 {o} / 最高 {h} / 最低 {l} / 昨收 {p}".format(
+                o=_money(self.open),
+                h=_money(self.high),
+                l=_money(self.low),
+                p=_money(self.prev_close),
+            ),
+        ]
+        if self.volume is not None:
+            lines.append(f"成交量：{self.volume:,.0f} 手")
+        if self.amount is not None:
+            lines.append(f"成交额：{self.amount / 1e8:,.2f} 亿元")
+
+        lines.append(f"数据源：{self.source}　数据时间：{self.as_of}")
+        return "\n".join(lines)
+
+
+@dataclass(slots=True)
+class KlineBar:
+    """一根 K 线。"""
+
+    date: str
+    open: float
+    close: float
+    high: float
+    low: float
+    volume: float | None = None  # 手
+    amount: float | None = None  # 元
+    change_pct: float | None = None  # %
+    turnover: float | None = None  # 换手率 %
+
+    def to_row(self) -> str:
+        """一行 CSV。比 JSON 省一半以上 token —— 60 根 K 线的差别很可观。"""
+        return (
+            f"{self.date},{self.open:.2f},{self.close:.2f},{self.high:.2f},"
+            f"{self.low:.2f},{self.volume if self.volume is not None else ''},"
+            f"{_pct_raw(self.change_pct)}"
+        )
+
+
+@dataclass(slots=True)
+class KlineSeries:
+    symbol: str
+    name: str
+    period: str  # daily / weekly / monthly
+    adjust: str  # none / forward / backward
+    bars: list[KlineBar]
+    source: str = ""
+    as_of: str = ""
+
+    def render(self) -> str:
+        if not self.bars:
+            return f"{self.name}（{self.symbol}）没有取到 K 线数据。"
+
+        first, last = self.bars[0], self.bars[-1]
+        lines = [
+            f"{self.name}（{self.symbol}）{PERIOD_LABEL.get(self.period, self.period)} K 线",
+            f"区间：{first.date} → {last.date}　共 {len(self.bars)} 根　复权："
+            f"{ADJUST_LABEL.get(self.adjust, self.adjust)}",
+            f"字段：日期,开,收,高,低,成交量(手),涨跌幅(%)",
+        ]
+        lines.extend(bar.to_row() for bar in self.bars)
+        lines.append(f"数据源：{self.source}　数据时间：{self.as_of}")
+        return "\n".join(lines)
+
+
+PERIOD_LABEL = {"daily": "日", "weekly": "周", "monthly": "月"}
+ADJUST_LABEL = {"none": "不复权", "forward": "前复权", "backward": "后复权"}
+
+
+@dataclass(slots=True)
+class FinancialPeriod:
+    """一期主要财务指标。缺失字段一律 None，**不要用 0 冒充缺失**。"""
+
+    period: str  # 如「2026中报」
+    report_date: str
+    revenue: float | None = None  # 营业总收入（元）
+    revenue_yoy: float | None = None  # %
+    net_profit: float | None = None  # 归母净利润（元）
+    net_profit_yoy: float | None = None  # %
+    deduct_net_profit: float | None = None  # 扣非归母净利润（元）
+    eps: float | None = None  # 基本每股收益（元）
+    bps: float | None = None  # 每股净资产（元）
+    roe: float | None = None  # 加权 ROE（%）
+    gross_margin: float | None = None  # 销售毛利率（%）
+    net_margin: float | None = None  # 销售净利率（%）
+    debt_ratio: float | None = None  # 资产负债率（%）
+    ocf_per_share: float | None = None  # 每股经营现金流（元）
+
+
+@dataclass(slots=True)
+class FinancialSummary:
+    symbol: str
+    name: str
+    periods: list[FinancialPeriod]
+    source: str = ""
+    as_of: str = ""
+
+    def render(self) -> str:
+        if not self.periods:
+            return f"{self.name}（{self.symbol}）没有取到财务数据。"
+
+        lines = [f"{self.name}（{self.symbol}）主要财务指标"]
+        for p in self.periods:
+            lines.append("")
+            lines.append(f"【{p.period}】报告期 {p.report_date[:10]}")
+            lines.append(
+                f"营业总收入：{_yi(p.revenue)}（同比 {_pct(p.revenue_yoy)}）　"
+                f"归母净利润：{_yi(p.net_profit)}（同比 {_pct(p.net_profit_yoy)}）"
+            )
+            if p.deduct_net_profit is not None:
+                lines.append(f"扣非归母净利润：{_yi(p.deduct_net_profit)}")
+            lines.append(
+                f"每股收益：{_money(p.eps)} 元　每股净资产：{_money(p.bps)} 元　"
+                f"加权 ROE：{_money(p.roe)}%"
+            )
+            lines.append(
+                f"毛利率：{_money(p.gross_margin)}%　净利率：{_money(p.net_margin)}%　"
+                f"资产负债率：{_money(p.debt_ratio)}%"
+            )
+        lines.append("")
+        lines.append(f"数据源：{self.source}　数据时间：{self.as_of}")
+        lines.append("注：以上为定期报告口径的累计值，同比为与上年同期对比。")
+        return "\n".join(lines)
+
+
+@runtime_checkable
+class MarketDataSource(Protocol):
+    """一个数据源要提供的东西：身份、能力、以及各能力的取数方法。
+
+    只实现自己声明了的能力对应的方法即可 —— Service 只会调它声明过的那些。
+    """
+
+    id: str
+    capabilities: set[Capability]
+
+    async def quote(self, symbol: str) -> Quote: ...
+
+
+def _pct_raw(value: float | None) -> str:
+    """CSV 里不用带 + 号，省一个字符。"""
+    return "" if value is None else f"{value:.2f}"
