@@ -13,7 +13,10 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol, runtime_checkable
 
 from ..errors import RetryableLLMError
+from ..logs import get_logger
 from .types import LLMResponse, Message, ToolSpec
+
+_log = get_logger("llm")
 
 TextHandler = Callable[[str], None]
 
@@ -70,9 +73,13 @@ async def stream_with_retry(
             last_error = exc
             if emitted or attempt == attempts - 1:
                 raise
+            delay = 2**attempt + random.uniform(0, 0.5)
+            _log.warning(
+                "LLM 请求第 %d/%d 次失败（%s），%.1f 秒后重试", attempt + 1, attempts, exc, delay
+            )
             # 退避 + 抖动。抖动不是装饰：限流场景下所有客户端如果都按
             # 1s/2s/4s 整齐重试，会在同一时刻再次撞在一起（重试风暴）。
-            await asyncio.sleep(2**attempt + random.uniform(0, 0.5))
+            await asyncio.sleep(delay)
 
     raise last_error or RetryableLLMError("LLM 请求失败")
 

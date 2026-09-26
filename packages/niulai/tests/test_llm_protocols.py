@@ -21,6 +21,7 @@ from niulai.llm.anthropic import (
 from niulai.llm.openai_compat import (
     build_payload as openai_payload,
     message_to_wire,
+    parse_usage as openai_usage,
     strip_leaked_chunk_json,
     tool_spec_to_wire,
 )
@@ -141,6 +142,41 @@ def test_anthropic的input_tokens不含缓存命中():
     assert usage.cache_read_tokens == 900
     assert usage.cache_write_tokens == 80
     assert usage.total_tokens == 1100
+
+
+def test_openai的缓存命中能被解析():
+    """OpenAI 形状：缓存量嵌套在 prompt_tokens_details.cached_tokens 里。"""
+    usage = openai_usage(
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 20,
+            "total_tokens": 1020,
+            "prompt_tokens_details": {"cached_tokens": 800, "audio_tokens": 0},
+        }
+    )
+    assert usage.cache_read_tokens == 800
+    assert usage.prompt_tokens == 1000  # OpenAI 的 prompt_tokens 本身就含缓存，不再累加
+
+
+def test_deepseek的缓存命中能被解析():
+    """DeepSeek 形状：字段是平铺的 prompt_cache_hit_tokens。"""
+    usage = openai_usage(
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 20,
+            "total_tokens": 1020,
+            "prompt_cache_hit_tokens": 900,
+            "prompt_cache_miss_tokens": 100,
+        }
+    )
+    assert usage.cache_read_tokens == 900
+
+
+def test_openai用量没有缓存字段时不产生噪音():
+    """老接口/小请求没有缓存字段，cache_read_tokens 保持 0，不写进 trace。"""
+    usage = openai_usage({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
+    assert usage.cache_read_tokens == 0
+    assert "cache_read_tokens" not in usage.to_dict()
 
 
 # --------------------------------------------------------------------------

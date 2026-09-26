@@ -30,7 +30,10 @@ from typing import Any
 import httpx
 
 from ..errors import DataSourceError
+from ..logs import get_logger
 from .base import Capability, FinancialPeriod, FinancialSummary, KlineBar, KlineSeries, Quote
+
+_log = get_logger("datasource.eastmoney")
 
 QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
 KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
@@ -240,6 +243,7 @@ class EastmoneyDataSource:
         last_error: str = "未知错误"
 
         for attempt in range(self._attempts):
+            _log.debug("GET %s (%s，第 %d 次)", url, what, attempt + 1)
             try:
                 resp = await self._client.get(url, params=params, headers=headers)
                 if resp.status_code in _RETRYABLE_STATUS or resp.status_code >= 500:
@@ -260,8 +264,17 @@ class EastmoneyDataSource:
                 last_error = f"响应不是 JSON（{exc}）"
 
             if attempt < self._attempts - 1:
+                delay = 0.4 * 2**attempt + random.uniform(0, 0.3)
+                _log.warning(
+                    "eastmoney %s 第 %d/%d 次失败（%s），%.1f 秒后重试",
+                    what,
+                    attempt + 1,
+                    self._attempts,
+                    last_error,
+                    delay,
+                )
                 # 退避 + 抖动：限流场景下整齐重试会再次撞在一起
-                await asyncio.sleep(0.4 * 2**attempt + random.uniform(0, 0.3))
+                await asyncio.sleep(delay)
 
         raise DataSourceError(
             f"eastmoney {what}请求失败（已重试 {self._attempts} 次）：{last_error}。"

@@ -28,6 +28,9 @@ from typing import Any, Protocol, runtime_checkable
 
 from ..artifacts import DEFAULT_INLINE_LIMIT, Artifact, ArtifactError, ArtifactStore
 from ..llm.types import ToolCall, ToolSpec
+from ..logs import get_logger
+
+_log = get_logger("tools")
 
 # 单个工具结果进入上下文的字符上限。超过就落盘成 artifact。
 MAX_RESULT_CHARS = DEFAULT_INLINE_LIMIT
@@ -101,6 +104,7 @@ class ToolRegistry:
 
         args, parse_error = _parse_arguments(call.arguments)
         if parse_error is not None:
+            _log.debug("工具 %s 参数不合法：%s", call.name, parse_error)
             return ToolResult(ok=False, content=parse_error)
 
         missing = _missing_required(tool.spec.parameters, args)
@@ -116,6 +120,7 @@ class ToolRegistry:
         try:
             raw = await asyncio.wait_for(tool.run(args), timeout=timeout_s)
         except TimeoutError:
+            _log.warning("工具 %s 超时（%.1f 秒）", call.name, timeout_s)
             return ToolResult(
                 ok=False,
                 content=(
@@ -124,6 +129,7 @@ class ToolRegistry:
                 ),
             )
         except Exception as exc:  # noqa: BLE001 —— 工具异常必须转成可读提示，不能让 agent 崩掉
+            _log.warning("工具 %s 异常：%s: %s", call.name, type(exc).__name__, exc)
             return ToolResult(
                 ok=False,
                 content=(

@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+# system 是给模型的指令、user 是用户、assistant 是模型、tool 是工具结果。
 Role = Literal["system", "user", "assistant", "tool"]
 
 

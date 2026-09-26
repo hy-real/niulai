@@ -35,9 +35,12 @@ import httpx
 
 from ..config import Settings
 from ..errors import FatalLLMError, RetryableLLMError, classify_status
+from ..logs import get_logger
 from .base import TextHandler, endpoint, stream_with_retry
 from .sse import parse_sse_line
 from .types import LLMResponse, Message, ToolCall, ToolSpec, Usage
+
+_log = get_logger("llm.anthropic")
 
 DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=10.0)
 
@@ -426,10 +429,17 @@ class AnthropicClient:
     ) -> LLMResponse:
         payload = build_payload(self._settings, messages, tools)
         headers = {
-            "x-api-key": self._settings.api_key,  # 注意不是 Authorization: Bearer
+            "x-api-key": self._settings.api_key,  # 注意不是 Authorization: Bearer；永远不进日志
             "anthropic-version": ANTHROPIC_VERSION,
             "Content-Type": "application/json",
         }
+        _log.debug(
+            "POST %s model=%s messages=%d tools=%d",
+            self._url,
+            self._settings.model,
+            len(messages),
+            len(tools),
+        )
 
         state = StreamState()
 
@@ -439,6 +449,7 @@ class AnthropicClient:
             ) as resp:
                 if resp.status_code >= 400:
                     body = (await resp.aread()).decode("utf-8", "replace")[:500]
+                    _log.warning("LLM HTTP %d：%s", resp.status_code, body)
                     error_cls = classify_status(resp.status_code)
                     raise error_cls(f"HTTP {resp.status_code}：{body}", status=resp.status_code)
 
@@ -455,4 +466,13 @@ class AnthropicClient:
         except httpx.TransportError as exc:
             raise RetryableLLMError(f"网络错误：{exc!r}") from exc
 
-        return state.to_response()
+        response = state.to_response()
+        _log.debug(
+            "LLM 完成 finish=%s tokens=%d 工具=%d 正文=%d 字 blocks=%d",
+            response.finish_reason,
+            response.usage.total_tokens,
+            len(response.tool_calls),
+            len(response.text),
+            len(response.raw_blocks or []),
+        )
+        return response

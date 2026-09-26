@@ -27,7 +27,7 @@ ProtocolName = Literal["openai", "anthropic"]
 DEFAULT_BASE_URLS: dict[str, str] = {
     # 默认走 DeepSeek：国内直连、便宜、工具调用够用
     "openai": "https://api.deepseek.com/v1",
-    "anthropic": "https://api.anthropic.com/v1",
+    "anthropic": "https://api.deepseek.com/anthropic",
 }
 
 DEFAULT_MODELS: dict[str, str] = {

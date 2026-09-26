@@ -35,6 +35,7 @@ from .datasource import build_default_service
 from .errors import ConfigError, NiulaiError
 from .events import Event, EventEmitter, EventType, new_run_id
 from .llm import build_client
+from .logs import setup_logging
 from .session import Session, SessionStore
 from .trace import TraceWriter, read_trace, resolve_run
 from .tools import ReadFileTool, ToolRegistry, build_stock_tools
@@ -674,6 +675,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     _enable_windows_ansi()
+    setup_logging()  # 级别来自 NIULAI_LOG_LEVEL（默认 warning，只写 stderr）
     args = build_parser().parse_args(argv)
 
     try:

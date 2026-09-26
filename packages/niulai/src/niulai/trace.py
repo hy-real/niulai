@@ -22,6 +22,7 @@ trace 里**绝不能出现 API Key**：build 事件时只放模型名与用量�
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -41,20 +42,38 @@ class TraceWriter:
         self._dir = Path(directory) if directory else trace_dir()
         self._dir.mkdir(parents=True, exist_ok=True)
         self.path = self._dir / f"{run_id}.jsonl"
+        self._write_failed = False
 
     def __call__(self, event: Event) -> None:
         if event.type in UI_ONLY_EVENTS:
             return  # 逐字增量不进 trace，最终内容由 assistant_message / final 记录
-        with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+        try:
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+        except OSError as exc:
+            # EventEmitter 会吞掉 sink 的异常（旁路不能拖垮 agent），所以这里
+            # 如果也不吭声，磁盘满 / 目录被删时 trace 会静默全丢 —— 排查问题时
+            # 才发现什么都没记下来。至少喊一声，且只喊一次，别刷屏。
+            if not self._write_failed:
+                self._write_failed = True
+                print(f"警告：trace 写入失败，本次运行的轨迹不会落盘：{exc}", file=sys.stderr)
 
 
 def read_trace(path: Path) -> Iterator[dict[str, Any]]:
+    """逐行读回一个 trace 文件。
+
+    进程被杀时最后一行可能只写了一半（见 architecture.md 7.13），
+    所以残缺行要跳过而不是让整个回放崩掉 —— 与 session.py 读取会话同一个原则。
+    """
     with Path(path).open("r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 yield json.loads(line)
+            except json.JSONDecodeError:
+                continue  # 半行就是损坏尾行，后面的（如果有）仍是完整 JSON
 
 
 def find_latest(directory: Path | None = None) -> Path | None:

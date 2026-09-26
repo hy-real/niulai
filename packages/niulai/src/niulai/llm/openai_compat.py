@@ -17,9 +17,12 @@ import httpx
 
 from ..config import Settings
 from ..errors import RetryableLLMError, classify_status
+from ..logs import get_logger
 from .base import TextHandler, endpoint, stream_with_retry
 from .sse import parse_sse_line
 from .types import LLMResponse, Message, ToolCall, ToolSpec, Usage
+
+_log = get_logger("llm.openai")
 
 DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=10.0)
 
@@ -134,9 +137,16 @@ class OpenAICompatClient:
     ) -> LLMResponse:
         payload = build_payload(self._settings, messages, tools)
         headers = {
-            "Authorization": f"Bearer {self._settings.api_key}",
+            "Authorization": f"Bearer {self._settings.api_key}",  # 永远不进日志
             "Content-Type": "application/json",
         }
+        _log.debug(
+            "POST %s model=%s messages=%d tools=%d",
+            self._url,
+            self._settings.model,
+            len(messages),
+            len(tools),
+        )
 
         text_parts: list[str] = []
         tool_slots: dict[int, dict[str, str]] = {}
@@ -149,6 +159,7 @@ class OpenAICompatClient:
             ) as resp:
                 if resp.status_code >= 400:
                     body = (await resp.aread()).decode("utf-8", "replace")[:500]
+                    _log.warning("LLM HTTP %d：%s", resp.status_code, body)
                     error_cls = classify_status(resp.status_code)
                     raise error_cls(f"HTTP {resp.status_code}：{body}", status=resp.status_code)
 
@@ -189,6 +200,14 @@ class OpenAICompatClient:
             for index, slot in sorted(tool_slots.items())
         ]
 
+        _log.debug(
+            "LLM 完成 finish=%s tokens=%d 工具=%d 正文=%d 字",
+            finish_reason,
+            usage.total_tokens,
+            len(tool_calls),
+            len("".join(text_parts)),
+        )
+
         return LLMResponse(
             text=strip_leaked_chunk_json("".join(text_parts)) or "",
             tool_calls=tool_calls,
@@ -226,10 +245,22 @@ def strip_leaked_chunk_json(content: str | None) -> str | None:
 
 
 def parse_usage(raw: dict[str, Any]) -> Usage:
+    """兼容两种缓存字段名：
+
+    - OpenAI：`prompt_tokens_details.cached_tokens`（嵌套在 details 里）
+    - DeepSeek：`prompt_cache_hit_tokens`（平铺，自家字段名）
+
+    缓存命中只有约 0.1x 输入价，不算清就没法知道省了多少 ——
+    与 anthropic.parse_usage 同一原则：IR 的 cache_read_tokens 必须被填上。
+    """
+    details = raw.get("prompt_tokens_details") or {}
+    cached = int(details.get("cached_tokens") or 0)
+    cached += int(raw.get("prompt_cache_hit_tokens") or 0)
     return Usage(
         prompt_tokens=int(raw.get("prompt_tokens") or 0),
         completion_tokens=int(raw.get("completion_tokens") or 0),
         total_tokens=int(raw.get("total_tokens") or 0),
+        cache_read_tokens=cached,
     )
 
 

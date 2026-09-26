@@ -99,6 +99,17 @@ sessions/   会话（多轮对话历史，JSON，可直接用编辑器打开看�
 artifacts/  因体积过大而落盘的工具结果
 ```
 
+### 调试日志
+
+trace 记的是运行轨迹；HTTP 层的细节（每次请求、重试、错误响应体）走标准 logging，
+只写 **stderr**（`--json` 的 stdout 事件流不受影响），默认关闭：
+
+```bash
+# PowerShell
+$env:NIULAI_LOG_LEVEL="DEBUG"      # debug / info / warning / error，默认 warning
+$env:NIULAI_LOG_FILE="d:\tmp\niulai.log"   # 可选：同时写文件
+```
+
 ---
 
 ## 现在能做什么
