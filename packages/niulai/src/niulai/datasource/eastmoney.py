@@ -35,9 +35,15 @@ from .base import Capability, FinancialPeriod, FinancialSummary, KlineBar, Kline
 
 _log = get_logger("datasource.eastmoney")
 
+# 实时行情快照：最新价 / 涨跌 / 今开 / 最高 / 最低 / 昨收 / 成交量额，
+# 字段名是 f43 这类无语义代号，由下面的 F 表映射成可读名
 QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
+# 历史 K 线：日 / 周 / 月（klt）、前 / 后复权（fqt），每根是一行固定 11 字段的 CSV
 KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+# 证券模糊搜索：把「茅台」这类名称 / 拼音解析成 6 位代码 + 市场号（_resolve 的兜底）
 SEARCH_URL = "https://searchapi.eastmoney.com/api/suggest/get"
+# 定期报告主要财务指标：营收 / 归母净利 / ROE 等。那边一次返回 165 个字段，
+# 只挑 FINANCE_FIELDS 里列的这些
 FINANCE_URL = "https://datacenter.eastmoney.com/securities/api/data/get"
 
 # 这是东方财富网页前端在用的公开 token，不是谁家的私钥。

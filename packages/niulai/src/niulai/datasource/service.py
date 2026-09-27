@@ -41,6 +41,10 @@ class MarketDataService:
         return [s for s in self._sources if capability in s.capabilities]
 
     async def quote(self, symbol: str) -> Quote:
+        """实时行情快照：最新价 / 涨跌 / 今开 / 最高 / 最低 / 成交量额。
+
+        `symbol` 可以是 '600519' / 'sh600519' / 「茅台」这类名称（由源内部解析）。
+        """
         return await self._route("quote", "quote", symbol)
 
     async def kline(
@@ -51,11 +55,13 @@ class MarketDataService:
         adjust: str = "forward",
         limit: int = 60,
     ) -> KlineSeries:
+        """历史 K 线：按 period（daily/weekly/monthly）与 adjust（复权方式）取最近 limit 根。"""
         return await self._route(
             "kline", "kline", symbol, period=period, adjust=adjust, limit=limit
         )
 
     async def financial(self, symbol: str, *, periods: int = 4) -> FinancialSummary:
+        """定期报告主要财务指标：营收 / 归母净利 / ROE / 毛利率等，最近 periods 期。"""
         return await self._route("financial", "financial", symbol, periods=periods)
 
     async def aclose(self) -> None:

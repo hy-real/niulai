@@ -8,10 +8,14 @@
 临时意图"——`NIULAI_PROTOCOL=anthropic niulai ask "..."` 这种临时切换
 必须赢过文件，否则试个协议还得改文件。
 
-## API Key 不进配置文件
+## API Key 的来源与优先级
 
-Key 只从环境变量读（将来接系统凭据管理器 keyring）。文件里写 api_key
-会被**忽略**——本地单用户也保持"机密不落盘"的洁癖，见 architecture.md 12。
+    环境变量  >  config.toml 里的 api_key
+
+单机本地使用，文件就在用户自己机器上，读文件没什么危险——
+所以文件里的 api_key 也认，只是排 env 后面（env 是"这个终端的
+临时意图"，应当赢过"这台机器的常态"）。将来如需多用户/共享
+环境再接系统凭据管理器 keyring，见 architecture.md 12。
 
 协议怎么选（按顺序取第一个命中的）：
 1. CLI `--protocol` / 环境变量 NIULAI_PROTOCOL / 文件里的 protocol；
@@ -178,15 +182,16 @@ class Settings:
 
         base_url = base_url_candidate or DEFAULT_BASE_URLS[resolved]
         model = _env("NIULAI_MODEL", "OPENAI_MODEL") or _clean(llm.get("model")) or DEFAULT_MODELS[resolved]
-        # Key 只认环境变量——文件里的 api_key 字段被刻意无视
-        api_key = _env(*KEY_ENV_VARS[resolved]) or ""
+        # Key：env 优先，其次 config.toml 里的 api_key（本地单用户场景够用）
+        api_key = _env(*KEY_ENV_VARS[resolved]) or _clean(llm.get("api_key")) or ""
 
         if require_key and not api_key:
             raise ConfigError(
                 "没有找到 API Key。\n"
                 '  Windows PowerShell:  $env:NIULAI_API_KEY="sk-..."\n'
-                '  macOS / Linux:       export NIULAI_API_KEY="sk-..."\n'
-                "  （Key 不支持写在 config.toml 里——机密不落盘，将来走系统凭据管理器）\n"
+                "  macOS / Linux:       export NIULAI_API_KEY=\"sk-...\"\n"
+                "  或者写入 ~/.niulai/config.toml 的 [llm] 节：api_key = \"sk-...\"\n"
+                "  （env 优先于文件；共享环境下建议只用 env，机密不落盘）\n"
                 f"  当前协议：{resolved}（可用 NIULAI_PROTOCOL 指定 openai / anthropic）\n"
                 f"  当前接入点：{base_url}（可用 NIULAI_BASE_URL 覆盖）"
             )

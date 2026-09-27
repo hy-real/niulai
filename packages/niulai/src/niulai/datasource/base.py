@@ -14,6 +14,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 
+# 一个数据源可以声明的能力，Service 按 这里 的值筛源：
+#   quote      实时行情快照（最新价 / 涨跌 / 今开 / 最高 / 最低 / 成交量额）
+#   kline      历史 K 线（日 / 周 / 月，支持前复权 / 后复权）
+#   financial  定期报告主要财务指标（营收 / 归母净利 / ROE / 毛利率等）
+#   moneyflow  资金流向（P3 待接入）
+#   sector     板块行情（P3 待接入）
 Capability = Literal["quote", "kline", "financial", "moneyflow", "sector"]
 
 
@@ -201,6 +207,8 @@ class MarketDataSource(Protocol):
     id: str
     capabilities: set[Capability]
 
+    # 各能力对应的取数方法与实现由具体源提供（如 EastmoneyDataSource），
+    # 方法名与 Capability 同名：quote() / kline() / financial()，Service 靠 getattr 反射调用
     async def quote(self, symbol: str) -> Quote: ...
 
 
