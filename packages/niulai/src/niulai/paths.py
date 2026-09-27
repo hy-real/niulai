@@ -1,44 +1,39 @@
-"""跨平台数据目录。
+"""数据目录：一切程序生成的文件都住在 `~/.niulai/`。
 
-P0 用最小实现即可：所有路径都能被环境变量 `NIULAI_HOME` 整体覆盖，
-方便测试、也方便做成便携版（数据跟着程序走）。
-P4 会换成更严格的平台标准目录并补上迁移逻辑。
+统一用一个目录（而不是按平台拆 config/data/cache 三处）是刻意的：
 
-目录布局：
+1. **本地优先是这个项目的卖点**——"你的一切都在这一个文件夹里，
+   删掉它 = 完全重置"，一句话讲清隐私故事；
+2. 跨平台形状一致，文档只写一份；
+3. 用户找得到：`cd ~/.niulai` 就能看会话、翻 trace。
+
+布局：
 
     <data_dir>/
-      traces/      每次 run 一个 JSONL
-      sessions/    会话（多轮对话历史）
-      artifacts/   大结果落盘（按 run 分子目录）
+      config.toml   用户配置（唯一需要人动手的文件；env 优先级高于它）
+      traces/       每次 run 一个 JSONL（运行轨迹，可回放）
+      sessions/     会话（多轮对话历史，JSON，可直接用编辑器打开看）
+      artifacts/    大结果落盘（按 run 分子目录，内容寻址命名）
+      logs/         调试日志（DEBUG/INFO 级别时自动落盘）
 
-**Key 不在这里的任何地方**：它属于系统凭据管理器，见 config.py 的说明。
+`NIULAI_HOME` 可整体覆盖根目录（测试与便携版靠它）。
+**Key 不在这里的任何地方**：它走环境变量，将来接系统凭据管理器（keyring）。
 """
 
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
-APP_NAME = "niulai"
+APP_NAME = ".niulai"
 
 
 def data_dir() -> Path:
-    """应用数据根目录（不保证已存在）。"""
+    """数据根目录（不保证已存在）。"""
     override = os.environ.get("NIULAI_HOME")
     if override:
         return Path(override).expanduser()
-
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA")
-        root = Path(base) if base else Path.home() / "AppData" / "Local"
-    elif sys.platform == "darwin":
-        root = Path.home() / "Library" / "Application Support"
-    else:
-        base = os.environ.get("XDG_DATA_HOME")
-        root = Path(base) if base else Path.home() / ".local" / "share"
-
-    return root / APP_NAME
+    return Path.home() / APP_NAME
 
 
 def ensure_data_dir() -> Path:
@@ -63,3 +58,7 @@ def sessions_dir() -> Path:
 
 def artifacts_dir() -> Path:
     return _sub("artifacts")
+
+
+def logs_dir() -> Path:
+    return _sub("logs")

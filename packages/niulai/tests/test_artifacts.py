@@ -29,10 +29,11 @@ def test_落盘后能读回(store):
     assert store.read(artifact.ref)[0].startswith("a,b,c")
 
 
-def test_引用里带run目录(store):
-    """引用用相对路径，跨会话也有效 —— 下一段对话仍能读到上次的结果。"""
+def test_引用是相对数据根的规范形式(store):
+    """规范形式 = `artifacts/<run_id>/<文件名>`，read_file 的围栏是数据根，
+    引用照抄即可解析；相对而非绝对——引用会存进会话 JSON，搬家不失效。"""
     artifact = store.save("hello", name="x", run_id="run1")
-    assert artifact.ref.startswith("run1/")
+    assert artifact.ref.startswith("artifacts/run1/")
     assert "/" in artifact.ref
 
 

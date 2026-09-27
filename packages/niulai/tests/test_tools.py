@@ -140,7 +140,7 @@ async def test_结果超限时落盘并只回摘要(store):
     )
 
     assert result.ok
-    assert len(result.content) < 600  # 进上下文的是摘要，不是 499 行
+    assert len(result.content) < 700  # 进上下文的是摘要，不是 499 行
     assert result.meta["content_chars"] > 2000  # 原始规模照样报出来
     assert result.meta["artifact"]
     assert "已完整保存为文件" in result.content
@@ -180,54 +180,125 @@ async def test_小结果原样进上下文(store):
 # --------------------------------------------------------------------------
 
 
-async def test_read_file_列出全部文件(store):
+async def test_read_file_列出全部文件(store, tmp_path):
     from niulai.tools import ReadFileTool
 
     store.save("a,b\n1,2\n3,4\n5,6", name="stock_kline", run_id="run1")
-    tool = ReadFileTool(store)
+    tool = ReadFileTool(store, data_root=tmp_path)
 
     output = await tool.run({})
     assert "可读文件" in output
     assert "stock_kline" in output
 
 
-async def test_read_file_能分页读(store):
+async def test_read_file_能分页读(store, tmp_path):
     from niulai.tools import ReadFileTool
 
     artifact = store.save("\n".join(f"第{i}行" for i in range(1, 101)), name="big", run_id="run1")
-    tool = ReadFileTool(store)
+    tool = ReadFileTool(store, data_root=tmp_path)
 
+    # 规范形式：引用相对数据根（artifacts/run1/...），走数据根解析，不经过 store
     output = await tool.run({"path": artifact.ref, "offset": 11, "limit": 5})
     assert "第 11–15 行 / 共 100 行" in output
     assert "第11行" in output
     assert "用 offset=16 继续读" in output
 
 
-async def test_read_file_越界时给可恢复的指引(store):
+async def test_read_file_老会话里的旧引用仍可读(store, tmp_path):
+    """兼容层：旧版引用（run1/big-xxx.csv，相对 artifacts 子目录）经 store 解析。"""
+    from niulai.tools import ReadFileTool
+
+    artifact = store.save("旧格式内容", name="legacy", run_id="run1")
+    old_ref = artifact.ref.removeprefix("artifacts/")  # 模拟老会话里存的形状
+    tool = ReadFileTool(store, data_root=tmp_path)
+
+    output = await tool.run({"path": old_ref})
+    assert "旧格式内容" in output
+
+
+async def test_read_file_越界时给可恢复的指引(store, tmp_path):
     """越界不能只是抛异常 —— 要告诉模型接下来能做什么。"""
     from niulai.tools import ReadFileTool
 
     store.save("x", name="ok", run_id="run1")
-    tool = ReadFileTool(store)
+    tool = ReadFileTool(store, data_root=tmp_path)
 
     output = await tool.run({"path": "../../../etc/passwd"})
     assert "拒绝访问" in output
     assert "可以调用 read_file 不传 path" in output
 
 
-async def test_read_file_没有文件时说清楚(store):
+async def test_read_file_没有文件时说清楚(store, tmp_path):
     from niulai.tools import ReadFileTool
 
-    output = await ReadFileTool(store).run({})
+    output = await ReadFileTool(store, data_root=tmp_path).run({})
     assert "没有落盘的文件" in output
 
 
-async def test_read_file_能力声明不含network(store):
+async def test_read_file_能力声明不含network(store, tmp_path):
     """它不出网、不写盘 —— 能力声明要如实。将来策略层靠它判断。"""
     from niulai.tools import ReadFileTool
 
-    capabilities = ReadFileTool(store).capabilities
+    capabilities = ReadFileTool(store, data_root=tmp_path).capabilities
     assert "read" in capabilities
     assert "network" not in capabilities
     assert "write_local" not in capabilities
+
+
+# --------------------------------------------------------------------------
+# read_file 边界 = 整个数据目录（2026-09-27 放宽，见 architecture.md 7.12）
+# --------------------------------------------------------------------------
+
+
+def _tool_with_data_root(store, tmp_path):
+    from niulai.tools import ReadFileTool
+
+    return ReadFileTool(store, data_root=tmp_path)
+
+
+async def test_read_file_能读数据目录内的其他文件(store, tmp_path):
+    """trace / 会话 / 日志都是程序自己生成的，整个数据目录都应该可读。"""
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    (traces / "run1.jsonl").write_text('{"type": "run_start"}\n', encoding="utf-8")
+
+    tool = _tool_with_data_root(store, tmp_path)
+    output = await tool.run({"path": "traces/run1.jsonl"})
+    assert "run_start" in output
+    assert "第 1–1 行 / 共 1 行" in output
+
+
+async def test_read_file_绝对路径落在数据目录内也可读(store, tmp_path):
+    """模型可能给绝对路径——只要在围栏内就放行。"""
+    target = tmp_path / "config.toml"
+    target.write_text("[llm]\nmodel = 'x'\n", encoding="utf-8")
+
+    tool = _tool_with_data_root(store, tmp_path)
+    output = await tool.run({"path": str(target)})
+    assert "model" in output
+
+
+async def test_read_file_数据目录内找不到时给相对路径写法指引(store, tmp_path):
+    tool = _tool_with_data_root(store, tmp_path)
+    output = await tool.run({"path": "traces/不存在.jsonl"})
+    assert "找不到文件" in output
+    assert "相对路径" in output
+
+
+async def test_read_file_数据目录外的绝对路径被围栏拒绝(store, tmp_path):
+    """目录外 = 将来走审批通道的占位：现在如实拒绝，且不让模型换路径重试。"""
+    outside = tmp_path.parent / "数据目录之外.txt"
+
+    tool = _tool_with_data_root(store, tmp_path)
+    output = await tool.run({"path": str(outside)})
+    assert "拒绝访问" in output
+    assert "尚未实现" in output
+    assert "不要换路径重试" in output
+
+
+async def test_read_file_索引提示数据目录内的其他可读项(store, tmp_path):
+    tool = _tool_with_data_root(store, tmp_path)
+    output = await tool.run({})
+    assert "traces/" in output
+    assert "sessions/" in output
 

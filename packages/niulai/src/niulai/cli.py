@@ -30,7 +30,7 @@ from typing import Any
 from . import __version__
 from .agent import AgentRuntime, RunResult
 from .artifacts import ArtifactStore
-from .config import Settings
+from .config import Settings, read_config_file
 from .datasource import build_default_service
 from .errors import ConfigError, NiulaiError
 from .events import Event, EventEmitter, EventType, new_run_id
@@ -675,7 +675,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     _enable_windows_ansi()
-    setup_logging()  # 级别来自 NIULAI_LOG_LEVEL（默认 warning，只写 stderr）
+    # 日志级别：env NIULAI_LOG_LEVEL > config.toml 的 [log].level > warning。
+    # 必须在任何子命令跑之前——config.toml 坏了要能看见警告。
+    file_cfg = read_config_file()
+    log_section = file_cfg.get("log") if isinstance(file_cfg.get("log"), dict) else {}
+    setup_logging(
+        level=os.environ.get("NIULAI_LOG_LEVEL")
+        or (log_section.get("level") if isinstance(log_section.get("level"), str) else None)
+    )
     args = build_parser().parse_args(argv)
 
     try:

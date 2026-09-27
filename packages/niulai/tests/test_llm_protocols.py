@@ -415,34 +415,35 @@ def test_协议推断(explicit, base_url, expected, monkeypatch):
     assert infer_protocol(explicit, base_url) == expected
 
 
-def test_只给了anthropic密钥时自动切到anthropic(monkeypatch):
+def test_只给了anthropic密钥时自动切到anthropic(monkeypatch, tmp_path):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
     monkeypatch.delenv("NIULAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     assert infer_protocol(None, None) == "anthropic"
 
-    settings = Settings.from_env()
+    # config_file 指向不存在的文件：测试不读真机上的 ~/.niulai/config.toml
+    settings = Settings.load(config_file=tmp_path / "none.toml")
     assert settings.protocol == "anthropic"
     assert settings.api_key == "sk-ant-x"
     assert settings.base_url == "https://api.anthropic.com/v1"
     assert settings.model == "claude-sonnet-5"
 
 
-def test_命令行指定协议时接入点和模型一起跟着换(monkeypatch):
+def test_命令行指定协议时接入点和模型一起跟着换(monkeypatch, tmp_path):
     """否则会出现"用 anthropic 协议去打 DeepSeek 地址"这种必错组合。"""
     for name in ("NIULAI_BASE_URL", "NIULAI_MODEL", "NIULAI_PROTOCOL", "OPENAI_BASE_URL", "OPENAI_MODEL"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("NIULAI_API_KEY", "sk-x")
 
-    settings = Settings.from_env(protocol="anthropic")
+    settings = Settings.load(protocol="anthropic", config_file=tmp_path / "none.toml")
     assert settings.protocol == "anthropic"
     assert settings.base_url == "https://api.anthropic.com/v1"
     assert settings.model == "claude-sonnet-5"
 
     # 显式设了接入点就尊重用户，不强改
     monkeypatch.setenv("NIULAI_BASE_URL", "https://proxy.example.com/anthropic/v1")
-    assert Settings.from_env().protocol == "anthropic"
+    assert Settings.load(config_file=tmp_path / "none.toml").protocol == "anthropic"
 
 
 def test_usage合并时缓存计数也要累加():

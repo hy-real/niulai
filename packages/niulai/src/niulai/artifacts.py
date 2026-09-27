@@ -44,8 +44,14 @@ class Artifact:
 
     @property
     def ref(self) -> str:
-        """给模型看的引用：相对 artifacts 根目录，跨会话也有效。"""
-        return f"{self.path.parent.name}/{self.path.name}"
+        """给模型看的引用：相对**数据根目录**（`~/.niulai`）的路径。
+
+        规范形式是 `artifacts/<run_id>/<文件名>`——read_file 的围栏就是
+        数据根，模型拿到引用原样调用即可，无需知道任何内部目录结构。
+        相对而非绝对：引用会被存进会话 JSON（工具结果文本），数据目录
+        搬家后老会话的引用依然有效，也不会把用户名写进 trace。
+        """
+        return f"artifacts/{self.path.parent.name}/{self.path.name}"
 
     def describe(self) -> str:
         return f"{self.ref}（{self.chars:,} 字符 / {self.lines:,} 行）"
@@ -98,6 +104,12 @@ class ArtifactStore:
 
         root = self.root.resolve()
         candidate = Path(raw)
+
+        # 兼容两种引用形式：规范形式带 `artifacts/` 前缀（相对数据根），
+        # 旧会话里存的是不带前缀的（相对本目录）。store 对两者都认——
+        # read_file 的围栏在数据根那层，这里只管把文件找出来。
+        if candidate.parts and candidate.parts[0] == "artifacts":
+            candidate = Path(*candidate.parts[1:])
 
         if candidate.is_absolute():
             resolved = candidate.resolve()

@@ -1,13 +1,22 @@
 """运行时配置。
 
-P0/P1 只从环境变量读取。后续会补上系统凭据管理器（keyring）与本地配置文件。
+## 优先级（高 → 低），与 git / aws cli / gh 同一惯例
 
-**API Key 永远不进 SQLite、不进 trace、不进日志。**
+    CLI 参数  >  环境变量  >  ~/.niulai/config.toml  >  内置默认值
 
-协议怎么选（`NIULAI_PROTOCOL`）：
-1. 显式写了 `openai` / `anthropic` → 就用它；
-2. 没写，但 `NIULAI_BASE_URL` 里含 `anthropic` → anthropic；
-3. 没写，但只提供了 `ANTHROPIC_API_KEY` → anthropic；
+作用域匹配生命周期：config.toml 是"这台机器的常态"，env 是"这个终端的
+临时意图"——`NIULAI_PROTOCOL=anthropic niulai ask "..."` 这种临时切换
+必须赢过文件，否则试个协议还得改文件。
+
+## API Key 不进配置文件
+
+Key 只从环境变量读（将来接系统凭据管理器 keyring）。文件里写 api_key
+会被**忽略**——本地单用户也保持"机密不落盘"的洁癖，见 architecture.md 12。
+
+协议怎么选（按顺序取第一个命中的）：
+1. CLI `--protocol` / 环境变量 NIULAI_PROTOCOL / 文件里的 protocol；
+2. 没写，但 base_url（env 或文件）里含 `anthropic` → anthropic；
+3. 没写，但只提供了 ANTHROPIC_API_KEY → anthropic；
 4. 其余 → openai（兼容面最广，DeepSeek / 通义 / 混元 / Kimi / OpenAI 都走它）。
 
 不确定协议时别硬填：填错的表现是"HTTP 404"或"model not found"，
@@ -17,12 +26,21 @@ P0/P1 只从环境变量读取。后续会补上系统凭据管理器（keyring�
 from __future__ import annotations
 
 import os
+import sys
+import tomllib
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Literal
 
 from .errors import ConfigError
+from .logs import get_logger
+from .paths import data_dir
+
+_log = get_logger("config")
 
 ProtocolName = Literal["openai", "anthropic"]
+
+CONFIG_FILE_NAME = "config.toml"
 
 DEFAULT_BASE_URLS: dict[str, str] = {
     # 默认走 DeepSeek：国内直连、便宜、工具调用够用
@@ -31,8 +49,8 @@ DEFAULT_BASE_URLS: dict[str, str] = {
 }
 
 DEFAULT_MODELS: dict[str, str] = {
-    "openai": "deepseek-chat",
-    "anthropic": "claude-sonnet-5",
+    "openai": "deepseek-flash",
+    "anthropic": "deepseek-flash",
 }
 
 KEY_ENV_VARS: dict[str, tuple[str, ...]] = {
@@ -63,8 +81,44 @@ def _env(*names: str) -> str | None:
     return None
 
 
+def _clean(value: object) -> str | None:
+    """配置文件里的字符串值：None / 非字符串 / 空白都归一成 None。"""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def config_file_path() -> Path:
+    return data_dir() / CONFIG_FILE_NAME
+
+
+def read_config_file(path: Path | None = None) -> dict:
+    """读 config.toml。读不到 / 读坏了都返回 {}——配置错误不拦住运行。
+
+    文件坏了要喊一声（stderr），但绝不能抛：用户手编 TOML 打错一个引号，
+    惩罚不应该是"程序起不来"，而是"这次按默认值跑 + 告诉他为什么"。
+    """
+    target = path or config_file_path()
+    if not target.is_file():
+        return {}
+    try:
+        with target.open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        print(f"警告：{target} 解析失败，本次忽略配置文件（{exc}）", file=sys.stderr)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _section(data: dict, name: str) -> dict:
+    """取一个节，且保证它是字典——`[llm]` 写成字符串这种错别字别把程序带崩。"""
+    section = data.get(name)
+    return section if isinstance(section, dict) else {}
+
+
 def infer_protocol(explicit: str | None, base_url: str | None) -> ProtocolName:
-    """按上面的四条规则推协议。"""
+    """按模块 docstring 里的四条规则推协议。"""
     if explicit in ("openai", "anthropic"):
         return explicit  # type: ignore[return-value]
     if base_url and "anthropic" in base_url.lower():
@@ -102,18 +156,29 @@ class Settings:
         return replace(self, **clean)  # type: ignore[arg-type]
 
     @classmethod
-    def from_env(cls, *, require_key: bool = True, protocol: str | None = None) -> Settings:
-        """从环境变量构造。
+    def load(
+        cls,
+        *,
+        require_key: bool = True,
+        protocol: str | None = None,
+        config_file: Path | None = None,
+    ) -> Settings:
+        """按优先级合并：CLI 参数 > 环境变量 > config.toml > 默认值。
 
-        `protocol` 是给 CLI 的 `--protocol` 用的显式覆盖 —— 走这里而不是
-        `with_overrides`，是为了让 base_url / model 的默认值跟着协议一起换。
-        否则 `--protocol anthropic` 会拿 DeepSeek 的地址去打 Claude，必错。
+        `protocol` 是 CLI 的 `--protocol`（最高优先级）；`config_file`
+        是给测试的注入点，缺省用 `~/.niulai/config.toml`。
         """
-        base_url_env = _env("NIULAI_BASE_URL", "OPENAI_BASE_URL")
-        resolved = infer_protocol(protocol or _env("NIULAI_PROTOCOL"), base_url_env)
+        llm = _section(read_config_file(config_file), "llm")
 
-        base_url = base_url_env or DEFAULT_BASE_URLS[resolved]
-        model = _env("NIULAI_MODEL", "OPENAI_MODEL") or DEFAULT_MODELS[resolved]
+        # ---- protocol：CLI > env > 文件；base_url 参与推断时同样 env 优先
+        file_protocol = _clean(llm.get("protocol"))
+        explicit = protocol or _env("NIULAI_PROTOCOL") or file_protocol
+        base_url_candidate = _env("NIULAI_BASE_URL", "OPENAI_BASE_URL") or _clean(llm.get("base_url"))
+        resolved = infer_protocol(explicit, base_url_candidate)
+
+        base_url = base_url_candidate or DEFAULT_BASE_URLS[resolved]
+        model = _env("NIULAI_MODEL", "OPENAI_MODEL") or _clean(llm.get("model")) or DEFAULT_MODELS[resolved]
+        # Key 只认环境变量——文件里的 api_key 字段被刻意无视
         api_key = _env(*KEY_ENV_VARS[resolved]) or ""
 
         if require_key and not api_key:
@@ -121,8 +186,65 @@ class Settings:
                 "没有找到 API Key。\n"
                 '  Windows PowerShell:  $env:NIULAI_API_KEY="sk-..."\n'
                 '  macOS / Linux:       export NIULAI_API_KEY="sk-..."\n'
+                "  （Key 不支持写在 config.toml 里——机密不落盘，将来走系统凭据管理器）\n"
                 f"  当前协议：{resolved}（可用 NIULAI_PROTOCOL 指定 openai / anthropic）\n"
                 f"  当前接入点：{base_url}（可用 NIULAI_BASE_URL 覆盖）"
             )
 
-        return cls(base_url=base_url, api_key=api_key, model=model, protocol=resolved)
+        return cls(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            protocol=resolved,
+            max_turns=_int_from(llm, "max_turns", DEFAULT_MAX_TURNS),
+            token_budget=_int_from(llm, "token_budget", DEFAULT_TOKEN_BUDGET),
+            tool_timeout_s=_float_from(llm, "tool_timeout_s", DEFAULT_TOOL_TIMEOUT_S),
+            max_retries=_int_from(llm, "max_retries", DEFAULT_MAX_RETRIES),
+            max_tokens=_int_from(llm, "max_tokens", DEFAULT_MAX_TOKENS),
+            max_consecutive_failures=_int_from(
+                llm, "max_consecutive_failures", DEFAULT_MAX_CONSECUTIVE_FAILURES
+            ),
+            keep_recent_tool_results=_int_from(
+                llm, "keep_recent_tool_results", DEFAULT_KEEP_RECENT_TOOL_RESULTS
+            ),
+            prompt_cache=_bool_from(llm, "prompt_cache", True),
+        )
+
+    # 兼容旧名（内部测试与老脚本可能还在用）；语义已变为"文件+env 合并加载"
+    @classmethod
+    def from_env(cls, **kwargs: object) -> Settings:
+        return cls.load(**kwargs)  # type: ignore[arg-type]
+
+
+def _int_from(section: dict, key: str, default: int) -> int:
+    value = section.get(key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        _log.warning("config.toml 的 %s = %r 不是整数，按默认值 %d 处理", key, value, default)
+        return default
+
+
+def _float_from(section: dict, key: str, default: float) -> float:
+    value = section.get(key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        _log.warning("config.toml 的 %s = %r 不是数字，按默认值 %g 处理", key, value, default)
+        return default
+
+
+def _bool_from(section: dict, key: str, default: bool) -> bool:
+    value = section.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    _log.warning("config.toml 的 %s = %r 不是布尔值，按默认值 %s 处理", key, value, default)
+    return default

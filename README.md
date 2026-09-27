@@ -91,13 +91,35 @@ niulai replay latest               # 回放最近一次运行的完整轨迹
 niulai tools                       # 列出工具、数据源与各自的能力声明
 ```
 
-数据目录（Windows 为 `%LOCALAPPDATA%\niulai\`）下有四个子目录，都可用 `NIULAI_HOME` 整体覆盖：
+### 配置与数据目录
+
+一切程序生成的文件都在 `~/.niulai/`（Windows 为 `C:\Users\你\.niulai\`），
+可用 `NIULAI_HOME` 整体覆盖，删掉它 = 完全重置：
 
 ```
-traces/     每次运行一个 JSONL（每一步都记，可回放）
-sessions/   会话（多轮对话历史，JSON，可直接用编辑器打开看）
-artifacts/  因体积过大而落盘的工具结果
+~/.niulai/
+├─ config.toml   用户配置（唯一需要人动手的文件，可省略）
+├─ traces/       每次运行一个 JSONL（每一步都记，可回放）
+├─ sessions/     会话（多轮对话历史，JSON，可直接用编辑器打开看）
+├─ artifacts/    因体积过大而落盘的工具结果
+└─ logs/         调试日志（DEBUG/INFO 时自动出现）
 ```
+
+config.toml 示例（只写想改的，其余用默认值）：
+
+```toml
+[llm]
+# protocol = "openai"          # openai（DeepSeek/通义/Kimi）或 anthropic（Claude）
+# base_url = "https://api.deepseek.com/v1"
+model = "deepseek-chat"
+max_turns = 12                  # 单次提问最多几轮工具循环
+
+[log]
+# level = "debug"               # 等价于环境变量 NIULAI_LOG_LEVEL
+```
+
+优先级：**CLI 参数 > 环境变量 > config.toml > 默认值**（与 git / aws cli 同惯例）。
+API Key 不进配置文件——机密不落盘，用环境变量，将来接系统凭据管理器。
 
 ### 调试日志
 
@@ -107,7 +129,7 @@ trace 记的是运行轨迹；HTTP 层的细节（每次请求、重试、错误
 ```bash
 # PowerShell
 $env:NIULAI_LOG_LEVEL="DEBUG"      # debug / info / warning / error，默认 warning
-$env:NIULAI_LOG_FILE="d:\tmp\niulai.log"   # 可选：同时写文件
+$env:NIULAI_LOG_FILE="d:\tmp\niulai.log"   # 可选：不设且级别开到 INFO/DEBUG 时自动落 ~/.niulai/logs/
 ```
 
 ---
