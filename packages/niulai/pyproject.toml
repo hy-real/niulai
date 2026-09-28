@@ -19,6 +19,10 @@ dependencies = [
 # akshare 只作为长尾数据源兜底（宏观 / 基金 / 龙虎榜），默认不装：
 # 它会拖入 pandas / numpy，桌面打包体积会从几十 MB 涨到 100MB+。
 longtail = ["akshare>=1.14"]
+# Web 服务层（niulai serve 用）：FastAPI + SSE。内核不依赖它，CLI 用户不必装。
+web = ["fastapi>=0.115", "uvicorn>=0.30"]
+# 桌面壳（apps/desktop/main.py 用）：原生窗口加载本地服务页面
+desktop = ["pywebview>=5.0"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",

@@ -182,6 +182,9 @@ class Assembly:
     runtime: AgentRuntime
     llm: Any
     service: Any
+    # Web 服务层（webapi.py）还需要这两件：工具清单接口、artifact 根目录
+    tools: Any = None
+    store: Any = None
 
 
 def _assemble(settings: Settings) -> Assembly:
@@ -193,7 +196,7 @@ def _assemble(settings: Settings) -> Assembly:
     )
     llm = build_client(settings)
     runtime = AgentRuntime(settings=settings, llm=llm, tools=tools)
-    return Assembly(runtime=runtime, llm=llm, service=service)
+    return Assembly(runtime=runtime, llm=llm, service=service, tools=tools, store=store)
 
 
 @dataclass(slots=True)
@@ -620,6 +623,25 @@ def _capability_order(capability: str) -> int:
 # --------------------------------------------------------------------------
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """启动本地 Web 服务（浏览器 / 将来的桌面壳共用同一个入口）。"""
+    try:
+        from .webapi import start_server
+    except ImportError as exc:
+        print(
+            "缺少 Web 依赖（FastAPI / uvicorn）。请先安装：\n"
+            '  pip install -e "packages/niulai[web]"\n'
+            f"（原始错误：{exc}）",
+            file=sys.stderr,
+        )
+        return 2
+    if args.web_dir:
+        os.environ["NIULAI_WEB_DIR"] = args.web_dir
+    print(f"Niulai 服务已启动：http://{args.host}:{args.port}（Ctrl-C 退出）")
+    start_server(host=args.host, port=args.port)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="niulai", description="本地优先的 A 股 AI 助手")
     parser.add_argument("--version", action="version", version=f"niulai {__version__}")
@@ -670,6 +692,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("tools", help="列出当前可用工具与数据源")
 
+    serve = sub.add_parser("serve", help="启动本地 Web 服务（浏览器 / 桌面壳共用）")
+    serve.add_argument("--host", default="127.0.0.1", help="监听地址（默认只绑本机）")
+    serve.add_argument("--port", type=int, default=8710, help="监听端口")
+    serve.add_argument("--web-dir", help="前端静态文件目录（默认自动定位 apps/desktop/web）")
+
     return parser
 
 
@@ -696,6 +723,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_sessions(args)
         if args.command == "tools":
             return _cmd_tools()
+        if args.command == "serve":
+            return _cmd_serve(args)
     except ConfigError as exc:
         print(f"配置错误：{exc}", file=sys.stderr)
         return 2

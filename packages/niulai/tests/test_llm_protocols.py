@@ -426,8 +426,8 @@ def test_只给了anthropic密钥时自动切到anthropic(monkeypatch, tmp_path)
     settings = Settings.load(config_file=tmp_path / "none.toml")
     assert settings.protocol == "anthropic"
     assert settings.api_key == "sk-ant-x"
-    assert settings.base_url == "https://api.anthropic.com/v1"
-    assert settings.model == "claude-sonnet-5"
+    assert settings.base_url == "https://api.deepseek.com/anthropic"
+    assert settings.model == "deepseek-flash"
 
 
 def test_命令行指定协议时接入点和模型一起跟着换(monkeypatch, tmp_path):
@@ -438,8 +438,8 @@ def test_命令行指定协议时接入点和模型一起跟着换(monkeypatch, 
 
     settings = Settings.load(protocol="anthropic", config_file=tmp_path / "none.toml")
     assert settings.protocol == "anthropic"
-    assert settings.base_url == "https://api.anthropic.com/v1"
-    assert settings.model == "claude-sonnet-5"
+    assert settings.base_url == "https://api.deepseek.com/anthropic"
+    assert settings.model == "deepseek-flash"
 
     # 显式设了接入点就尊重用户，不强改
     monkeypatch.setenv("NIULAI_BASE_URL", "https://proxy.example.com/anthropic/v1")
