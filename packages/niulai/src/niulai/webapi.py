@@ -15,7 +15,8 @@
 
 ## 并发与安全
 
-- 同一时刻只允许一个 run（单用户本地产品），后来者拿 409；
+- **按会话隔离并发**：同一会话同时只允许一个 run（409），不同会话可并行；
+- 每帧事件注入 session_id，前端据此路由到对应会话的视图；
 - 只绑 127.0.0.1，并校验 Host 头（防 DNS rebinding）；
 - API Key 不经 HTTP 传输——服务端从 env / config.toml 自己读。
 """
@@ -58,23 +59,36 @@ def web_dir() -> Path | None:
     return candidate if candidate.is_dir() else None
 
 
-class _RunSlot:
-    """当前 run 的占位。单用户产品，同一时刻只允许一个 run。"""
+class _RunRegistry:
+    """进行中任务的登记表。
+
+    并发模型：**按会话隔离**——同一会话同时只允许一个 run（对话本该串行），
+    不同会话可以并行跑。数据源限流是基础设施问题，不在此处设卡；
+    后续由全局限流层（P3）统一治理。
+    """
 
     def __init__(self) -> None:
-        self.task: asyncio.Task[Any] | None = None
-        self.run_id: str | None = None
+        self._by_run: dict[str, tuple[str, asyncio.Task[Any]]] = {}
+        self._by_session: dict[str, str] = {}  # session_id -> run_id
 
-    def busy(self) -> bool:
-        return self.task is not None and not self.task.done()
+    def session_busy(self, session_id: str | None) -> bool:
+        return session_id in self._by_session
 
-    def release(self, run_id: str) -> None:
-        if self.run_id == run_id:
-            self.task = None
-            self.run_id = None
+    def start(self, session_id: str, run_id: str, task: asyncio.Task[Any]) -> None:
+        self._by_run[run_id] = (session_id, task)
+        self._by_session[session_id] = run_id
+
+    def finish(self, run_id: str) -> None:
+        entry = self._by_run.pop(run_id, None)
+        if entry and self._by_session.get(entry[0]) == run_id:
+            del self._by_session[entry[0]]
+
+    def task_for(self, run_id: str) -> asyncio.Task[Any] | None:
+        entry = self._by_run.get(run_id)
+        return entry[1] if entry else None
 
 
-_RUN_SLOT = _RunSlot()
+_RUNS = _RunRegistry()
 # SessionStore 在 create_app() 里创建（而不是模块级）：
 # 它的目录在构造时确定，模块级实例会抢在测试设置 NIULAI_HOME 之前定型
 
@@ -254,8 +268,6 @@ def create_app() -> FastAPI:
         task_text = req.task.strip()
         if not task_text:
             raise HTTPException(status_code=422, detail="问题不能为空")
-        if _RUN_SLOT.busy():
-            raise HTTPException(status_code=409, detail="已有一个运行中的任务，请等它结束或先停止")
 
         try:
             settings = Settings.load()
@@ -266,6 +278,9 @@ def create_app() -> FastAPI:
             session = store.load(req.session_id) if req.session_id else store.create()
         except SessionError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        if _RUNS.session_busy(session.id):
+            raise HTTPException(status_code=409, detail="该会话已有一个正在运行的任务")
 
         run_id = new_run_id()
         asm = _assemble(settings)
@@ -285,8 +300,7 @@ def create_app() -> FastAPI:
                     session_id=session.id,
                 )
             )
-            _RUN_SLOT.task = run_task
-            _RUN_SLOT.run_id = run_id
+            _RUNS.start(session.id, run_id, run_task)
             run_task.add_done_callback(lambda _t: queue.put_nowait(_DONE))
 
             try:
@@ -294,7 +308,8 @@ def create_app() -> FastAPI:
                     item = await queue.get()
                     if item is _DONE:
                         break
-                    yield _sse_frame(item.type.value, item.to_dict())
+                    # 每帧注入 session_id：前端据此把事件路由到对应会话的视图
+                    yield _sse_frame(item.type.value, {**item.to_dict(), "session_id": session.id})
 
                 try:
                     result = run_task.result()
@@ -333,7 +348,7 @@ def create_app() -> FastAPI:
                 # 浏览器断开 / 服务端异常时，别让内核任务悬着
                 if not run_task.done():
                     run_task.cancel()
-                _RUN_SLOT.release(run_id)
+                _RUNS.finish(run_id)
                 await asm.llm.aclose()
                 await asm.service.aclose()
 
@@ -345,8 +360,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/runs/{run_id}/cancel")
     async def api_cancel_run(run_id: str):
-        task = _RUN_SLOT.task
-        if _RUN_SLOT.run_id != run_id or task is None or task.done():
+        task = _RUNS.task_for(run_id)
+        if task is None or task.done():
             raise HTTPException(status_code=404, detail="没有正在运行的该任务")
         task.cancel()
         return {"ok": True}

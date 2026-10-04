@@ -117,3 +117,24 @@ def test_非法协议返回422(monkeypatch, tmp_path):
     client = _client(monkeypatch, tmp_path)
     resp = client.put("/api/config", json={"protocol": "gemini"})
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------- 并发登记表
+
+
+def test_runregistry_按会话隔离并行():
+    """核心并发语义：同会话互斥，跨会话并行。"""
+    from niulai.webapi import _RunRegistry
+
+    reg = _RunRegistry()
+    reg.start("s1", "r1", None)
+    reg.start("s2", "r2", None)
+
+    assert reg.session_busy("s1")
+    assert reg.session_busy("s2")
+    assert not reg.session_busy("s3")   # 新会话不受影响
+
+    reg.finish("r1")
+    assert not reg.session_busy("s1")
+    assert reg.session_busy("s2")
+    assert reg.task_for("r1") is None
