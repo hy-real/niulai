@@ -41,9 +41,6 @@ from .trace import TraceWriter
 
 DEFAULT_PORT = 8710
 
-# 会话历史接口里单条消息内容截断长度（完整内容在会话 JSON 文件里）
-_HISTORY_CONTENT_CHARS = 400
-
 _DONE = object()  # 队列哨兵：run 任务已结束（区别于任何 Event）
 
 
@@ -90,20 +87,38 @@ class RunRequest(BaseModel):
     session_id: str | None = None
 
 
+class ConfigUpdate(BaseModel):
+    """设置面板提交的字段。None / 空串 = 不修改该项（api_key 同理，防止误清空）。"""
+
+    protocol: str | None = None
+    base_url: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+    max_turns: int | None = None
+    token_budget: int | None = None
+    tool_timeout_s: float | None = None
+    keep_recent_tool_results: int | None = None
+
+
 def _sse_frame(event: str, data: dict[str, Any]) -> str:
     """一条 SSE 帧。data 是单行 JSON —— Event.to_dict() 本来就是扁平的。"""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 def _history_view(messages: list[Any]) -> list[dict[str, Any]]:
-    """会话历史的界面视图：不含 system，长内容截断（完整原文在会话文件里）。"""
+    """会话历史的界面视图：不含 system，内容完整返回。
+
+    本地单用户 + 会话已在 _history_view 序列化时扣掉 system，不做长度截断——
+    界面要能完整看到 agent 说过的每一句话（用户明确要求"长点就长点"）。
+    大结果的真实数据本来就在 artifacts 落盘，transcript 里只有摘要 + 路径，
+    所以单条消息的体积天然有上界，不用担心这个接口膨胀。
+    """
     out: list[dict[str, Any]] = []
     for m in messages:
         if m.role == "system":
             continue
         item: dict[str, Any] = {"role": m.role}
-        content = m.content or ""
-        item["content"] = content[:_HISTORY_CONTENT_CHARS] + ("…" if len(content) > _HISTORY_CONTENT_CHARS else "")
+        item["content"] = m.content or ""
         if m.role == "assistant" and m.tool_calls:
             item["tool_calls"] = [
                 {"name": c.name, "arguments": c.arguments} for c in m.tool_calls
@@ -113,170 +128,6 @@ def _history_view(messages: list[Any]) -> list[dict[str, Any]]:
             item["is_error"] = m.is_error
         out.append(item)
     return out
-
-
-# 内置极简聊天页：桌面壳与无前端的浏览器访问都吃它。单文件、零构建。
-# 渲染逻辑与 cli.py 的 ConsoleRenderer 同一张"事件 → 视觉"对照表；
-# 将来做正式前端（apps/desktop/web）后它自动让位——web_dir() 存在即不启用。
-_FALLBACK_UI = """<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Niulai</title>
-<style>
-  :root { --bg:#0f1115; --panel:#1c2130; --border:#262c3a; --text:#d7dce6; --muted:#7d8799;
-          --accent:#4f8cff; --green:#3fb27f; --red:#e0566a; --yellow:#d9a53f; }
-  * { box-sizing:border-box; margin:0; }
-  body { background:var(--bg); color:var(--text); height:100vh; display:flex; flex-direction:column;
-         font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
-  header { padding:10px 18px; border-bottom:1px solid var(--border); color:var(--muted);
-           font-size:13px; display:flex; justify-content:space-between; }
-  #chat { flex:1; overflow-y:auto; padding:18px 22px; display:flex; flex-direction:column; gap:12px; }
-  .user { align-self:flex-end; background:#2b4a8f; padding:9px 14px; border-radius:14px 14px 3px 14px;
-          max-width:78%; white-space:pre-wrap; }
-  .assistant { align-self:flex-start; background:var(--panel); padding:10px 14px;
-               border-radius:14px 14px 14px 3px; max-width:86%; white-space:pre-wrap; }
-  .line { align-self:flex-start; color:var(--muted); font-size:12.5px; padding-left:4px; }
-  .tool { align-self:flex-start; background:#141821; border:1px solid var(--border); border-radius:8px;
-          padding:7px 11px; font-family:Consolas,Menlo,monospace; font-size:12.5px; max-width:86%; }
-  .tool .head { color:var(--accent); }
-  .tool .prev { color:var(--muted); margin-top:5px; white-space:pre-wrap; word-break:break-all; }
-  .ok { color:var(--green); } .err { color:var(--red); } .warn { color:var(--yellow); }
-  #composer { display:flex; gap:10px; padding:12px 18px; border-top:1px solid var(--border); }
-  #input { flex:1; resize:none; background:var(--panel); color:var(--text); border:1px solid var(--border);
-           border-radius:10px; padding:10px 13px; font:inherit; outline:none; height:52px; }
-  #input:focus { border-color:var(--accent); }
-  button { background:var(--accent); color:#fff; border:0; border-radius:10px; padding:0 22px;
-           font:inherit; cursor:pointer; }
-  button:disabled { opacity:.45; cursor:default; }
-  #stop { background:var(--panel); border:1px solid var(--border); display:none; }
-</style></head>
-<body>
-<header><div><b style="color:var(--text)">Niulai</b> · 本地 A 股助手</div><div id="info"></div></header>
-<div id="chat"></div>
-<form id="composer">
-  <textarea id="input" placeholder="问点什么，例如：贵州茅台现在多少钱　（Enter 发送 / Shift+Enter 换行）"></textarea>
-  <button id="send" type="submit">发送</button>
-  <button id="stop" type="button">■ 停止</button>
-</form>
-<script>
-'use strict';
-const chat = document.getElementById('chat'), input = document.getElementById('input');
-const sendBtn = document.getElementById('send'), stopBtn = document.getElementById('stop');
-let busy = false, aborter = null, runId = null, sessionId = null, bubble = null, lastCard = null;
-
-fetch('/api/tools').then(r => r.json()).then(d => {
-  document.getElementById('info').textContent =
-    '数据源 ' + d.sources.join('、') + ' · 工具 ' + d.tools.length + ' 个';
-}).catch(() => {});
-
-function el(cls, text) {
-  const d = document.createElement('div'); d.className = cls;
-  if (text !== undefined) d.textContent = text;
-  chat.appendChild(d); chat.scrollTop = chat.scrollHeight; return d;
-}
-function scroll() { chat.scrollTop = chat.scrollHeight; }
-function setBusy(v) { busy = v; sendBtn.disabled = v; input.disabled = v;
-  stopBtn.style.display = v ? '' : 'none'; }
-
-function handle(name, d) {
-  if (name === 'turn_start') {
-    bubble = null;
-    el('line', '· 第 ' + d.turn + ' 轮' + (d.tools_enabled ? '' : '（收口：不再调用工具）'));
-  } else if (name === 'text_delta') {
-    if (!bubble) bubble = el('assistant', '');
-    bubble.textContent += d.text; scroll();
-  } else if (name === 'assistant_message') {
-    bubble = null;  // 完整消息已由 text_delta 流出，这里只收尾
-  } else if (name === 'tool_call') {
-    bubble = null;
-    lastCard = el('tool');
-    const head = document.createElement('div'); head.className = 'head';
-    head.textContent = '⚙ ' + d.name + '(' + d.arguments + ')';
-    lastCard.appendChild(head);
-  } else if (name === 'tool_result') {
-    if (lastCard) {
-      const st = document.createElement('div'); st.className = d.ok ? 'ok' : 'err';
-      let t = (d.ok ? '✓ ' : '✗ ') + d.name + ' 返回 ' + d.content_chars + ' 字符';
-      if (d.original_chars && d.original_chars !== d.content_chars)
-        t += '（原始 ' + d.original_chars.toLocaleString() + '，已落盘）';
-      st.textContent = t; lastCard.appendChild(st);
-      if (d.preview) {
-        const p = document.createElement('div'); p.className = 'prev';
-        p.textContent = d.preview.slice(0, 300); lastCard.appendChild(p);
-      }
-      lastCard = null;
-    }
-  } else if (name === 'circuit_break') {
-    bubble = null; el('line warn', '⛔ 熔断：' + d.name + ' 已被拦下，未执行');
-  } else if (name === 'artifact') {
-    el('line', '📄 结果过大已落盘：' + d.path + '（' + (d.content_chars || 0).toLocaleString() + ' 字符）');
-  } else if (name === 'error') {
-    el('line err', '! ' + d.kind + ': ' + d.message);
-  } else if (name === 'run_result') {
-    sessionId = d.session_id || sessionId;
-    const labels = { done: '正常结束', max_turns: '达到轮数上限', token_budget: '超出 token 预算',
-                     cancelled: '已取消', error: '运行出错' };
-    let meta = '— ' + (labels[d.stop_reason] || d.stop_reason || '结束');
-    if (d.turns) meta += ' · ' + d.turns + ' 轮';
-    if (d.usage && d.usage.total_tokens) meta += ' · ' + d.usage.total_tokens.toLocaleString() + ' tokens';
-    el('line', meta);
-  }
-}
-
-async function send() {
-  const task = input.value.trim();
-  if (!task || busy) return;
-  setBusy(true); el('user', task); input.value = '';
-  bubble = null; lastCard = null;
-  aborter = new AbortController();
-  let sawRunId = false;
-  try {
-    const res = await fetch('/api/runs', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task: task, session_id: sessionId }),
-      signal: aborter.signal
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      el('line err', '· ' + (err.detail || ('HTTP ' + res.status)));
-      return;
-    }
-    const reader = res.body.getReader(), decoder = new TextDecoder('utf-8');
-    let buf = '';
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      buf += decoder.decode(chunk.value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf('\\n\\n')) >= 0) {
-        const block = buf.slice(0, idx); buf = buf.slice(idx + 2);
-        let evName = 'message', dataText = '';
-        for (const ln of block.split('\\n')) {
-          if (ln.startsWith('event:')) evName = ln.slice(6).trim();
-          else if (ln.startsWith('data:')) dataText += ln.slice(5).trim();
-        }
-        if (!dataText) continue;
-        let d; try { d = JSON.parse(dataText); } catch (e) { continue; }
-        if (!sawRunId && d.run_id) { runId = d.run_id; sawRunId = true; }
-        handle(evName, d);
-      }
-    }
-  } catch (e) {
-    if (e.name !== 'AbortError') el('line err', '· 连接中断：' + e.message);
-  } finally { setBusy(false); }
-}
-
-stopBtn.addEventListener('click', () => {
-  if (runId) fetch('/api/runs/' + runId + '/cancel', { method: 'POST' }).catch(() => {});
-  if (aborter) aborter.abort();
-});
-document.getElementById('composer').addEventListener('submit', e => { e.preventDefault(); send(); });
-input.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-});
-</script>
-</body></html>
-"""
 
 
 def create_app() -> FastAPI:
@@ -295,7 +146,10 @@ def create_app() -> FastAPI:
         base = web_dir()
         if base and (base / "index.html").is_file():
             return FileResponse(base / "index.html")
-        return HTMLResponse(_FALLBACK_UI)
+        return HTMLResponse(
+            "<h1>Niulai API</h1><p>未找到前端页面。请把 index.html 放入 apps/desktop/web/，"
+            "或用 NIULAI_WEB_DIR / --web-dir 指定静态目录。</p>"
+        )
 
     @app.get("/api/tools")
     def api_tools():
@@ -342,6 +196,58 @@ def create_app() -> FastAPI:
             "title": session.title or "(无标题)",
             "messages": _history_view(session.messages),
         }
+
+    @app.get("/api/config")
+    def api_get_config():
+        """当前生效的配置（env 与 config.toml 合并后的视图，Key 只回尾号）。"""
+        settings = Settings.load(require_key=False)
+        return {
+            "protocol": settings.protocol,
+            "base_url": settings.base_url,
+            "model": settings.model,
+            "max_turns": settings.max_turns,
+            "token_budget": settings.token_budget,
+            "tool_timeout_s": settings.tool_timeout_s,
+            "keep_recent_tool_results": settings.keep_recent_tool_results,
+            "has_key": bool(settings.api_key),
+            "key_hint": ("已配置（尾号 " + settings.api_key[-4:] + "）") if settings.api_key else "未配置",
+        }
+
+    @app.put("/api/config")
+    def api_put_config(req: ConfigUpdate):
+        """写入 ~/.niulai/config.toml 的 [llm] 节。
+
+        注意：这里只写文件——env 优先级高于文件（config.py 的铁律），所以
+        如果终端设了 NIULAI_MODEL 之类，文件改动不会体现在 GET 的合并视图里。
+        内核每次提问都重新 Settings.load()，因此保存后无需重启。
+        """
+        if req.protocol is not None and req.protocol not in ("openai", "anthropic"):
+            raise HTTPException(status_code=422, detail="protocol 只能是 openai 或 anthropic")
+
+        from .config import config_file_path, read_config_file
+
+        data = read_config_file()
+        llm = data.get("llm") if isinstance(data.get("llm"), dict) else {}
+
+        updates = req.model_dump(exclude_none=True)
+        key = updates.pop("api_key", None)
+        if key is not None and key.strip():
+            llm["api_key"] = key.strip()
+        for field, value in updates.items():
+            if isinstance(value, str) and not value.strip():
+                continue  # 空串 = 不修改
+            llm[field] = value
+        data["llm"] = llm
+
+        path = config_file_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            import tomli_w
+
+            path.write_text(tomli_w.dumps(data), encoding="utf-8")
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"写入配置文件失败：{exc}") from exc
+        return {"ok": True, "path": str(path), "note": "下一条提问即生效"}
 
     @app.post("/api/runs")
     async def api_create_run(req: RunRequest):

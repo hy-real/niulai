@@ -1,13 +1,14 @@
-"""Web 服务层测试：不跑真实 run（无网络、秒级），只验证只读端点与守卫。
+"""Web 服务层测试：不跑真实 run（无网络、秒级），只验证只读端点、配置读写与守卫。
 
 run 的完整链路（SSE 流、取消、断连清理）涉及真实 LLM 调用，属于
-P3.5 任务级 eval 的范畴；这里守住的是"装配正确、协议不破"。
+P3.5 任务级 eval 的范畴；这里守住的是"装配正确、协议不破、配置可读写"。
 """
 
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from niulai.config import read_config_file
 from niulai.webapi import create_app
 
 
@@ -59,4 +60,60 @@ def test_空问题返回422(monkeypatch, tmp_path):
     monkeypatch.setenv("NIULAI_API_KEY", "sk-x")
     client = _client(monkeypatch, tmp_path)
     resp = client.post("/api/runs", json={"task": "   "})
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------- 配置端点
+
+
+def test_读取配置端点返回生效值(monkeypatch, tmp_path):
+    monkeypatch.setenv("NIULAI_API_KEY", "sk-secret-9999")
+    client = _client(monkeypatch, tmp_path)
+    data = client.get("/api/config").json()
+    assert data["protocol"] == "openai"
+    assert data["max_turns"] == 12
+    assert data["has_key"] is True
+    assert "9999" in data["key_hint"]  # Key 只回尾号，不回原文
+
+
+def test_写入配置端点更新config文件(monkeypatch, tmp_path):
+    monkeypatch.setenv("NIULAI_API_KEY", "sk-x")
+    client = _client(monkeypatch, tmp_path)
+    resp = client.put(
+        "/api/config",
+        json={"model": "moonshot-v1-8k", "base_url": "https://api.moonshot.cn/v1", "max_turns": 6},
+    )
+    assert resp.status_code == 200
+
+    # 直接读配置文件验证（GET 是合并视图，验证不了"写进了文件"）
+    cfg = read_config_file()
+    assert cfg["llm"]["model"] == "moonshot-v1-8k"
+    assert cfg["llm"]["base_url"] == "https://api.moonshot.cn/v1"
+    assert cfg["llm"]["max_turns"] == 6
+
+
+def test_写入配置时空字段不覆盖(monkeypatch, tmp_path):
+    """空串 = 不修改：设置面板里留空的输入框不应把已有配置抹掉。"""
+    monkeypatch.setenv("NIULAI_API_KEY", "sk-x")
+    client = _client(monkeypatch, tmp_path)
+    client.put("/api/config", json={"model": "kimi"})
+    client.put("/api/config", json={"model": "", "base_url": ""})
+
+    cfg = read_config_file()
+    assert cfg["llm"]["model"] == "kimi"
+    assert "base_url" not in cfg["llm"]
+
+
+def test_写入配置时api_key留空不清空原key(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    client.put("/api/config", json={"api_key": "sk-from-ui"})
+    client.put("/api/config", json={"api_key": ""})
+
+    cfg = read_config_file()
+    assert cfg["llm"]["api_key"] == "sk-from-ui"
+
+
+def test_非法协议返回422(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    resp = client.put("/api/config", json={"protocol": "gemini"})
     assert resp.status_code == 422
