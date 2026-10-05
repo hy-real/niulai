@@ -43,7 +43,6 @@ from .tools import ReadFileTool, ToolRegistry, build_stock_tools
 STOP_REASON_LABEL = {
     "done": "正常结束",
     "max_turns": "达到轮数上限，已强制收敛",
-    "token_budget": "超出 token 预算，已强制收敛",
     "cancelled": "被取消",
 }
 
@@ -530,12 +529,7 @@ def _render_record(record: dict[str, Any], color: Palette) -> None:
         extra = ""
         if record.get("context_omitted"):
             extra = f"　已压缩 {record['context_omitted']} 条历史工具结果"
-        print(
-            color.dim(
-                f"[{ts}] 第 {record.get('turn')} 轮　"
-                f"预算剩余 {record.get('budget_left', 0):,} tokens{extra}"
-            )
-        )
+        print(color.dim(f"[{ts}] 第 {record.get('turn')} 轮{extra}"))
 
     elif kind == "assistant_message":
         text = (record.get("text") or "").strip()

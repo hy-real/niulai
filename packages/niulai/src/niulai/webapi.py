@@ -63,8 +63,6 @@ class _RunRegistry:
     """进行中任务的登记表。
 
     并发模型：**按会话隔离**——同一会话同时只允许一个 run（对话本该串行），
-    不同会话可以并行跑。数据源限流是基础设施问题，不在此处设卡；
-    后续由全局限流层（P3）统一治理。
     """
 
     def __init__(self) -> None:
@@ -109,7 +107,6 @@ class ConfigUpdate(BaseModel):
     model: str | None = None
     api_key: str | None = None
     max_turns: int | None = None
-    token_budget: int | None = None
     tool_timeout_s: float | None = None
     keep_recent_tool_results: int | None = None
 
@@ -220,7 +217,6 @@ def create_app() -> FastAPI:
             "base_url": settings.base_url,
             "model": settings.model,
             "max_turns": settings.max_turns,
-            "token_budget": settings.token_budget,
             "tool_timeout_s": settings.tool_timeout_s,
             "keep_recent_tool_results": settings.keep_recent_tool_results,
             "has_key": bool(settings.api_key),

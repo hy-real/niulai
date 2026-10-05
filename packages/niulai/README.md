@@ -129,9 +129,8 @@ finally:
 
 ## 可调参数（`Settings`）
 
-`max_turns` / `token_budget` / `tool_timeout_s` / `max_consecutive_failures` /
-`keep_recent_tool_results` / `max_retries` —— 前四个是**硬约束**，
-对应"五件套"里的四项（第五项是取消，由 asyncio 任务取消承担）。
+`max_turns` / `tool_timeout_s` / `max_consecutive_failures` / `keep_recent_tool_results` /
+`max_retries` —— 前三个是**硬约束**，对应"四件套"里的三项（第四项是取消，由 asyncio 任务取消承担）。
 
 ## 开发
 

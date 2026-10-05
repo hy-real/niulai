@@ -63,14 +63,13 @@ KEY_ENV_VARS: dict[str, tuple[str, ...]] = {
 }
 
 DEFAULT_MAX_TURNS = 12
-DEFAULT_TOKEN_BUDGET = 60_000
 DEFAULT_TOOL_TIMEOUT_S = 15.0
 DEFAULT_MAX_RETRIES = 2
 # 同一工具连续失败几次就熔断。见 agent/guard.py —— 这是把 prompt 里的
 # "连续失败两次就停"变成 runtime 强制的那个开关。
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 2
 # 发给模型时保留最近几条工具结果的原样内容（更早的换成占位说明）。
-DEFAULT_KEEP_RECENT_TOOL_RESULTS = 4
+DEFAULT_KEEP_RECENT_TOOL_RESULTS = 15
 # Anthropic 的 max_tokens 是必填项，而且**包含思考预算** ——
 # 给太小会在长报告里被截断。OpenAI 兼容那边不传这个字段，用服务端默认。
 DEFAULT_MAX_TOKENS = 8_192
@@ -136,8 +135,8 @@ def infer_protocol(explicit: str | None, base_url: str | None) -> ProtocolName:
 class Settings:
     """一次运行的全部可调参数。
 
-    `max_turns` / `token_budget` / `tool_timeout_s` 三个是硬约束，
-    对应"四件套"里的三个（第四个是取消，由 asyncio 任务取消承担）。
+    `max_turns` / `tool_timeout_s` 两个是硬约束，
+    对应"四件套"里的两个（另外两个是取消与运行时熔断）。
     """
 
     base_url: str
@@ -145,7 +144,6 @@ class Settings:
     model: str
     protocol: ProtocolName = "openai"
     max_turns: int = DEFAULT_MAX_TURNS
-    token_budget: int = DEFAULT_TOKEN_BUDGET
     tool_timeout_s: float = DEFAULT_TOOL_TIMEOUT_S
     max_retries: int = DEFAULT_MAX_RETRIES
     max_tokens: int = DEFAULT_MAX_TOKENS
@@ -202,7 +200,6 @@ class Settings:
             model=model,
             protocol=resolved,
             max_turns=_int_from(llm, "max_turns", DEFAULT_MAX_TURNS),
-            token_budget=_int_from(llm, "token_budget", DEFAULT_TOKEN_BUDGET),
             tool_timeout_s=_float_from(llm, "tool_timeout_s", DEFAULT_TOOL_TIMEOUT_S),
             max_retries=_int_from(llm, "max_retries", DEFAULT_MAX_RETRIES),
             max_tokens=_int_from(llm, "max_tokens", DEFAULT_MAX_TOKENS),

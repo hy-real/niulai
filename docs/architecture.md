@@ -144,7 +144,7 @@ sequenceDiagram
     U->>C: niulai ask "茅台现在多少钱"
     C->>R: 提交任务（可随时取消）
     R->>S: 开一条 run，准备 trace
-    loop ReAct 循环（受轮数 / token 预算约束）
+    loop ReAct 循环（受轮数 / 超时约束）
         R->>L: messages + 工具 schema
         L-->>R: 流式返回（文本 / tool_call / usage）
         R-->>C: 事件流（SSE）
@@ -181,17 +181,21 @@ sequenceDiagram
 
 **代价**：LangGraph 会隐藏 token 记账（需显式挂 callback），而手写版每一分钱都看得见。
 
-### 7.2 五件套预算：轮数 + token + 超时 + 取消 + 熔断
+### 7.2 四件套预算：轮数 + 超时 + 取消 + 熔断
 
-上一版设计（AgentForge）踩过的坑：`MAX_ITERATIONS = 100`、无 token 预算、无单工具超时、无取消。结果是一个坏工具能把整轮跑废。
+上一版设计（AgentForge）踩过的坑：`MAX_ITERATIONS = 100`、无单工具超时、无取消。结果是一个坏工具能把整轮跑废。
 
-**决策**：五者缺一不可，且都是**硬约束**：
+**决策**：四者缺一不可，且都是**硬约束**：
 
 - 轮数上限（默认 12）
-- token 预算（超预算强制收敛并给出摘要）
 - 单工具超时
 - 取消要真能传到底：靠 `asyncio` 的任务取消（`Task.cancel()` → `CancelledError` 逐层透传），**不要自定义标志位**
 - **重复调用熔断**（同工具连续失败、或同参数重复调用）
+
+> **2026-10-05 移除 token 预算**：曾经是第五件。移除的理由：`max_turns` 已经隐式约束了
+> 单次运行的 token 上限（有限的 LLM 调用次数 × 每次受上下文窗口限制），
+> 再设一道 token 闸门是同一层保护的重复设卡，还与 7.3 的上下文裁剪职责重叠。
+> 两处真相不如一处。用量的**统计**照旧（USAGE 事件与 trace），只是不再作为停止条件。
 
 **第 5 条为什么必须落在 runtime**：`system_v1.md` 写了「同一个工具连续失败两次就停下来」，但 loop 根本不计数，**模型也没有可靠的计数器** —— 它看到的是文本，不是变量。让模型执行控制流，等于让它心算。所以：
 
@@ -298,7 +302,7 @@ Service 按 **capability + 优先级 + 健康度** 选源，失败自动换下�
 三个反直觉的坑，都是实打实会 400 的：
 
 1. **Anthropic 的流式错误是从正常 200 的流里推出来的**，拿不到 HTTP 状态码，得按 `error.type` 自己分类可重试与否。
-2. **`input_tokens` 不含缓存命中量**。真实输入 = `input_tokens + cache_creation + cache_read`。漏了会让 token 预算低估好几倍。
+2. **`input_tokens` 不含缓存命中量**。真实输入 = `input_tokens + cache_creation + cache_read`。漏了会让用量统计低估好几倍。
 3. **收口轮那句"请立刻回答"紧跟工具结果**，在 Anthropic 下会形成两条连续 user 消息 —— 非法。所以转换时要按 role 合并。
 
 `max_tokens` 在 Anthropic 上是**包含思考**的预算；8K 是奔着"别在长报告里被截断"去的。

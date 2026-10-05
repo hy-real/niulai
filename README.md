@@ -138,7 +138,7 @@ $env:NIULAI_LOG_FILE="d:\tmp\niulai.log"   # 可选：不设且级别开到 INFO
 
 | 能力 | 状态 |
 | --- | --- |
-| 手写 ReAct 内核（轮数 / token 预算 / 工具超时 / 取消） | ✅ |
+| 手写 ReAct 内核（轮数 / 工具超时 / 取消 / 熔断） | ✅ |
 | 流式输出 | ✅ |
 | 工具参数校验、错误结构化回灌 | ✅ |
 | 两套协议：OpenAI 兼容 / Anthropic Messages | ✅ |
@@ -214,7 +214,7 @@ niulai ask "How much is Moutai trading at?"
 niulai chat                 # multi-turn conversation with persistent history
 ```
 
-Current capabilities: a hand-written ReAct loop (turn / token / timeout / cancellation budgets),
+Current capabilities: a hand-written ReAct loop (turn / timeout / cancellation budgets,
 quote + K-line + financial tools, oversized results written to disk with a `read_file` tool to
 page them back, context trimming that never breaks tool-call pairing, and a runtime circuit
 breaker so repeated or repeatedly-failing calls are stopped without relying on the model's

@@ -4,13 +4,12 @@
 循环本身只有几十行，但预算、取消、截断、错误回灌这些细节全在这里。
 上了框架，这些恰好会被藏起来 —— 而它们正是面试会被追问的东西。
 
-五个停止条件，缺一不可：
+四个停止条件，缺一不可：
 
 1. 模型不再要求调用工具 → 正常结束
 2. 达到轮数上限        → 强制收敛（最后一轮不让调工具）
-3. 超出 token 预算     → 强制收敛
-4. 外部取消            → `asyncio.CancelledError` 向上传播
-5. 运行时熔断          → 重复 / 连续失败的调用被拦下，逼模型收敛
+3. 外部取消            → `asyncio.CancelledError` 向上传播
+4. 运行时熔断          → 重复 / 连续失败的调用被拦下，逼模型收敛
 
 第 4 条不自己造"取消标志位"：`asyncio` 的任务取消会逐层透传，
 自己加一套标志反而最容易漏掉某一层。
@@ -66,7 +65,7 @@ class RunResult:
     text: str
     turns: int
     usage: Usage
-    stop_reason: str  # done | max_turns | token_budget | cancelled
+    stop_reason: str  # done | max_turns | cancelled
     messages: list[Message] = field(default_factory=list)
     # 被运行时拦下的调用次数（熔断）。>0 说明模型试图空转。
     breaks: int = 0
@@ -127,8 +126,7 @@ class AgentRuntime:
 
         try:
             for turn in range(1, self._settings.max_turns + 1):
-                budget_left = max(0, self._settings.token_budget - usage.total_tokens)
-                force_answer = budget_left <= 0 or turn == self._settings.max_turns
+                force_answer = turn == self._settings.max_turns
 
                 # 发出去的是一份裁剪视图；transcript 本身始终完整。
                 view, context_stats = fit_context(
@@ -140,7 +138,6 @@ class AgentRuntime:
                 emitter.emit(
                     EventType.TURN_START,
                     turn=turn,
-                    budget_left=budget_left,
                     tools_enabled=not force_answer,
                     context_omitted=context_stats.omitted,
                 )
@@ -160,7 +157,7 @@ class AgentRuntime:
                     transcript.append(Message(role="assistant", content=response.text))
                     emitter.emit(EventType.ASSISTANT_MESSAGE, turn=turn, text=response.text)
                     final_text = response.text
-                    stop_reason = "token_budget" if budget_left <= 0 else "max_turns"
+                    stop_reason = "max_turns"
                     break
 
                 transcript.append(

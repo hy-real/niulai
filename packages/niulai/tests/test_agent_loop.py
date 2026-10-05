@@ -135,26 +135,6 @@ async def test_模型一直要工具时最后一轮必须收口():
     assert llm.seen_tools[-1] == []
 
 
-async def test_超出token预算时强制收敛():
-    llm = _FakeLLM(
-        [
-            LLMResponse(tool_calls=[_tool_call()], usage=Usage(400, 400, 800)),
-            LLMResponse(text="收口回答", usage=Usage(1, 1, 2)),
-        ]
-    )
-    emitter, _ = _emitter()
-    runtime = AgentRuntime(
-        settings=_settings(token_budget=100, max_turns=10),  # type: ignore[arg-type]
-        llm=llm,
-        tools=ToolRegistry([_QuoteTool()]),
-    )
-
-    result = await runtime.run("x", emitter=emitter)
-
-    assert result.stop_reason == "token_budget"
-    assert result.text == "收口回答"
-
-
 async def test_事件序列完整且序号连续():
     llm = _FakeLLM([LLMResponse(text="你好", usage=Usage(1, 1, 2))])
     emitter, events = _emitter()
