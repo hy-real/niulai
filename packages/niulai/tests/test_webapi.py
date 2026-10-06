@@ -92,6 +92,46 @@ def test_空问题返回422(monkeypatch, tmp_path):
     assert resp.status_code == 422
 
 
+class _StubRuntime:
+    """假内核：不联网，立即返回一个最小 run 结果。"""
+
+    async def run(self, task, *, emitter, messages, session_id):
+        from niulai.llm.types import Usage
+
+        class _Result:
+            pass
+
+        r = _Result()
+        r.stop_reason, r.turns, r.usage, r.breaks = "done", 1, Usage(1, 1, 2), 0
+        r.messages = [Message(role="user", content=task)]
+        return r
+
+
+def test_新会话在run开始前就落库(monkeypatch, tmp_path):
+    """前端首帧拿到 session_id 就会刷新侧栏 —— 那时会话必须已经在库里，
+    否则列表是空的，用户要等 run 结束（或手动点）才能看到会话。"""
+    import types
+
+    import niulai.webapi as webapi_mod
+
+    monkeypatch.setenv("NIULAI_API_KEY", "sk-x")
+    client = _client(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        webapi_mod, "_assemble", lambda settings: types.SimpleNamespace(runtime=_StubRuntime())
+    )
+
+    resp = client.post("/api/runs", json={"task": "茅台多少钱"})
+    assert resp.status_code == 200
+
+    store = SessionStore()
+    items = store.list_ids()
+    assert len(items) == 1
+    assert items[0].title == "茅台多少钱"   # 创建时就带标题，侧栏立刻可读
+    loaded = store.latest()
+    assert loaded.messages[0].content == "茅台多少钱"
+    assert loaded.runs                       # run 结束后照常更新内容
+
+
 # ---------------------------------------------------------------- 配置端点
 
 

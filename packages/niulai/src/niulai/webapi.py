@@ -43,7 +43,7 @@ from .errors import ConfigError
 from .events import EventEmitter, EventType, new_run_id
 from .llm import Usage
 from .paths import trace_dir
-from .session import SessionError, SessionStore, _ts_ms
+from .session import TITLE_CHARS, SessionError, SessionStore, _ts_ms
 from .trace import TraceResumeError, TraceWriter, load_transcript, read_trace
 
 DEFAULT_PORT = 8710
@@ -409,6 +409,15 @@ def create_app() -> FastAPI:
             session = store.load(req.session_id) if req.session_id else store.create()
         except SessionError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        # 新会话**立即落库**（标题取首条提问，截断规则与 _derive_title 一致）：
+        # 前端首帧拿到 session_id 刷新侧栏时就能看到这条会话，不必等 run 结束。
+        # run 结束时 note_run 只在标题为空时才改写，不会覆盖这里的标题。
+        if not session.title:
+            session.title = (
+                task_text if len(task_text) <= TITLE_CHARS else task_text[:TITLE_CHARS] + "…"
+            )
+            store.save(session)
 
         # 先同步占位再返回响应：check 与 set 之间没有 await，
         # 两个并发请求不可能同时占住同一个会话（→ 409）。

@@ -35,6 +35,7 @@ from .base import Capability, FinancialPeriod, FinancialSummary, KlineBar, Kline
 
 _log = get_logger("datasource.eastmoney")
 
+
 # 实时行情快照：最新价 / 涨跌 / 今开 / 最高 / 最低 / 昨收 / 成交量额，
 # 字段名是 f43 这类无语义代号，由下面的 F 表映射成可读名
 QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
