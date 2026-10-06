@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from .llm.types import Message
 
 # 保留最近多少条工具结果的原样内容。行情类数据时效性强，老结果留着价值低。
-DEFAULT_KEEP_RECENT_TOOL_RESULTS = 4
+DEFAULT_KEEP_RECENT_TOOL_RESULTS = 15
 
 _PLACEHOLDER = "[此处原有一次 `{name}` 的返回，共 {chars:,} 字符，为控制上下文已省略。" \
     "如果这份数据仍然需要，请重新调用该工具。]"

@@ -278,6 +278,21 @@ async def test_read_file_绝对路径落在数据目录内也可读(store, tmp_p
     assert "model" in output
 
 
+async def test_read_file_读config时对api_key脱敏(store, tmp_path):
+    """config.toml 里可能存着 Key（webapi 设置面板会写入）；工具结果会进
+    模型上下文（= 随下一次请求发到模型厂商），明文 Key 不能走这条路。
+    只脱敏值本身，其余配置项照常可读。"""
+    (tmp_path / "config.toml").write_text(
+        '[llm]\nmodel = "x"\napi_key = "sk-secret-1234567890"\n', encoding="utf-8"
+    )
+
+    tool = _tool_with_data_root(store, tmp_path)
+    output = await tool.run({"path": "config.toml"})
+    assert "model" in output
+    assert "sk-secret-1234567890" not in output
+    assert "已脱敏" in output
+
+
 async def test_read_file_数据目录内找不到时给相对路径写法指引(store, tmp_path):
     tool = _tool_with_data_root(store, tmp_path)
     output = await tool.run({"path": "traces/不存在.jsonl"})

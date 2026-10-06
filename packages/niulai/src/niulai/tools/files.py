@@ -23,10 +23,12 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 from ..artifacts import ArtifactError, ArtifactStore
+from ..config import CONFIG_FILE_NAME
 from ..llm.types import ToolSpec
 from ..paths import data_dir
 
@@ -77,7 +79,8 @@ class ReadFileTool:
                 "读取本程序自己生成的文件，支持按行分页。\n"
                 "适用：① 工具返回里出现「结果过大，已完整保存为文件」时，"
                 "把给出的路径原样传入；② 读数据目录内的其他文件"
-                "（`traces/` 运行轨迹、`sessions/` 会话、`logs/`、`config.toml`）。\n"
+                "（`traces/` 运行轨迹、`sessions/` 会话、`logs/`、`config.toml`"
+                "——其中 api_key 会自动脱敏）。\n"
                 "不适用：读用户电脑上的任意文件 —— 数据目录**之外**一律拒绝"
                 "（用户让你看别的文件时，直接说明做不到）。\n"
                 "分页建议：先读前 200 行判断结构，再按需要跳读；"
@@ -126,6 +129,11 @@ class ReadFileTool:
             text = _read_capped(resolved)
             if "\x00" in text[:1000]:
                 return f"`{raw}` 看起来是二进制文件，不支持以文本方式读取。"
+            if resolved.name == CONFIG_FILE_NAME:
+                # config.toml 可能存着 api_key（webapi 设置面板会写入）。
+                # 工具结果会进入模型上下文、随下一次请求发到模型厂商 ——
+                # 明文 Key 绝不能走这条路。只替换值本身，其余配置照常可读。
+                text = _mask_api_key(text)
             chunk, total, start = _paginate(text, offset, limit)
             return self._render(raw, chunk, total, start)
 
@@ -185,6 +193,14 @@ def _read_capped(path: Path, *, max_chars: int = _MAX_CHARS) -> str:
     """读文本、封顶体量。坏字节用替换符顶替而不是炸——磁盘上的字节不归我们保证。"""
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         return fh.read(max_chars)
+
+
+# api_key = "sk-..." / api_key = 'sk-...' → 值打码，行结构不动
+_SECRET_RE = re.compile(r"(?i)(api_key\s*=\s*)(['\"])([^'\"]*)\2")
+
+
+def _mask_api_key(text: str) -> str:
+    return _SECRET_RE.sub(r"\1\2***已脱敏***\2", text)
 
 
 def _as_int(value: Any, *, default: int, low: int, high: int) -> int:

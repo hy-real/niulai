@@ -145,18 +145,21 @@ class SessionStore:
 
     def _resolve(self, session_id: str) -> Path:
         raw = (session_id or "").strip()
+        if not raw:
+            raise SessionError("会话 id 不能为空")
         if raw in ("latest", "last"):
             items = self.list_ids(limit=1)
             if not items:
                 raise SessionError("还没有任何会话")
             return self.directory / f"{items[0].id}.json"
 
-        direct = Path(raw)
-        if direct.exists():
-            return direct
+        # 围栏：只认本目录内的会话文件。raw 会经 webapi 原样暴露给浏览器端，
+        # 这里若接受"任意已存在的路径"，就是一个现成的任意文件读。
+        if ".." in raw or "/" in raw or "\\" in raw:
+            raise SessionError(f"非法的会话 id：{raw}")
 
         exact = self.directory / f"{raw}.json"
-        if exact.exists():
+        if exact.is_file():
             return exact
 
         matches = sorted(self.directory.glob(f"*{raw}*.json"))

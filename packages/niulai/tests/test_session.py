@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import pytest
+
 from niulai.llm import Message, ToolCall, Usage
-from niulai.session import SessionStore
+from niulai.session import SessionError, SessionStore
 
 
 def _store(tmp_path) -> SessionStore:
@@ -168,3 +170,18 @@ def test_会话文件是可读的json(tmp_path):
     assert payload["messages"][0]["content"] == "你好"
     # 没值的字段不写，文件才读得下去
     assert "tool_calls" not in payload["messages"][0]
+
+
+def test_会话id不接受任意路径(tmp_path):
+    """load 的输入经 webapi 原样暴露给浏览器 —— 围栏必须在 _resolve 收口，
+    否则传一个存在的文件路径就能把数据目录外的任意 JSON 读回来。"""
+    secret = tmp_path / "secret.json"
+    secret.write_text('{"id":"x"}', encoding="utf-8")
+    store = _store(tmp_path)
+
+    with pytest.raises(SessionError):
+        store.load(str(secret))       # 绝对路径
+    with pytest.raises(SessionError):
+        store.load("../secret")       # 相对穿越
+    with pytest.raises(SessionError):
+        store.load("")                # 空串（曾会解析成当前目录）

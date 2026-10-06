@@ -122,19 +122,18 @@ def test_非法协议返回422(monkeypatch, tmp_path):
 # ---------------------------------------------------------------- 并发登记表
 
 
-def test_runregistry_按会话隔离并行():
-    """核心并发语义：同会话互斥，跨会话并行。"""
+def test_runregistry_reserve是同步占位_防并发穿透():
+    """handler 返回响应与生成器启动之间有异步间隙：占位必须是同步原子的
+    check+set，两个并发请求不可能同时占住同一个会话。"""
     from niulai.webapi import _RunRegistry
 
     reg = _RunRegistry()
-    reg.start("s1", "r1", None)
-    reg.start("s2", "r2", None)
+    assert reg.reserve("s1", "r1")
+    assert not reg.reserve("s1", "r2")  # 第二个请求被挡下（→ 409）
+    assert reg.reserve("s2", "r3")      # 不同会话不受影响
 
-    assert reg.session_busy("s1")
-    assert reg.session_busy("s2")
-    assert not reg.session_busy("s3")   # 新会话不受影响
+    # task 后挂：占位先行，attach 之后 cancel 端点才能找到它
+    assert reg.task_for("r1") is None
 
     reg.finish("r1")
-    assert not reg.session_busy("s1")
-    assert reg.session_busy("s2")
-    assert reg.task_for("r1") is None
+    assert reg.reserve("s1", "r4")      # run 结束（或被清理）后占位释放

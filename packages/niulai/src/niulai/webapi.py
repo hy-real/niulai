@@ -26,6 +26,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +35,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-from .cli import _assemble
+from .cli import Assembly, _assemble
 from .config import Settings
+from .datasource.base import Capability
 from .errors import ConfigError
 from .events import EventEmitter, new_run_id
 from .session import SessionError, SessionStore
@@ -63,18 +66,32 @@ class _RunRegistry:
     """进行中任务的登记表。
 
     并发模型：**按会话隔离**——同一会话同时只允许一个 run（对话本该串行），
+    不同会话可以并行跑。
+
+    占位必须是**同步原子**的（reserve）：如果 handler 里只做 check、
+    登记留给 StreamingResponse 生成器去做，两个并发请求会在生成器
+    启动前都通过检查 —— 登记与检查之间隔着真实的异步间隙。
+    asyncio 单线程内没有 await 的代码段天然原子，check+set 收进
+    同一个同步函数即可；task 由生成器启动后再 attach 挂上。
     """
 
     def __init__(self) -> None:
-        self._by_run: dict[str, tuple[str, asyncio.Task[Any]]] = {}
+        self._by_run: dict[str, tuple[str, asyncio.Task[Any] | None]] = {}
         self._by_session: dict[str, str] = {}  # session_id -> run_id
 
-    def session_busy(self, session_id: str | None) -> bool:
-        return session_id in self._by_session
-
-    def start(self, session_id: str, run_id: str, task: asyncio.Task[Any]) -> None:
-        self._by_run[run_id] = (session_id, task)
+    def reserve(self, session_id: str, run_id: str) -> bool:
+        """同步占位：同一会话的第二个请求拿到 False（→ 409），不可能都进来。"""
+        if session_id in self._by_session:
+            return False
         self._by_session[session_id] = run_id
+        self._by_run[run_id] = (session_id, None)
+        return True
+
+    def attach(self, run_id: str, task: asyncio.Task[Any]) -> None:
+        """run 任务真正创建后挂上（供 cancel 端点找到它）。"""
+        entry = self._by_run.get(run_id)
+        if entry is not None:
+            self._by_run[run_id] = (entry[0], task)
 
     def finish(self, run_id: str) -> None:
         entry = self._by_run.pop(run_id, None)
@@ -142,7 +159,33 @@ def _history_view(messages: list[Any]) -> list[dict[str, Any]]:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Niulai", docs_url=None, redoc_url=None)
+    # 装配缓存：key 是不可变的 Settings 值。配置没变 → 复用同一份装配
+    # （LLM 的 httpx 连接池、将来 P3 的限流器 / 结果缓存，都是只有跨请求
+    # 共享才成立的全局状态——每请求新建等于让它们失效）；配置变了（PUT
+    # /api/config 或 env）→ 新 key 自然 miss，重建即可，"保存后即生效"
+    # 的动态刷新语义不受影响。缓存放 create_app 里而不是模块级：
+    # ArtifactStore 的数据目录在构造时解析，模块级会抢在测试设置
+    # NIULAI_HOME 之前定型（SessionStore 同理，见下）。
+    _asm_cache: dict[Settings, Assembly] = {}
+
+    def _get_asm(settings: Settings) -> Assembly:
+        asm = _asm_cache.get(settings)
+        if asm is None:
+            asm = _assemble(settings)
+            _asm_cache[settings] = asm
+        return asm
+
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        yield
+        # 旧装配不在"配置变更"时关闭——可能有 run 正在用它的连接——
+        # 统一留给进程收尾；改一次配置最多闲置一份连接，本地可接受。
+        for asm in _asm_cache.values():
+            await asm.llm.aclose()
+            await asm.service.aclose()
+        _asm_cache.clear()
+
+    app = FastAPI(title="Niulai", docs_url=None, redoc_url=None, lifespan=_lifespan)
     store = SessionStore()
 
     @app.middleware("http")
@@ -165,7 +208,7 @@ def create_app() -> FastAPI:
     @app.get("/api/tools")
     def api_tools():
         """工具与数据源清单（不需要 Key）。"""
-        asm = _assemble(Settings.load(require_key=False))
+        asm = _get_asm(Settings.load(require_key=False))
         tools = asm.tools
         out_tools = []
         for name in tools.names():
@@ -177,10 +220,10 @@ def create_app() -> FastAPI:
                     "capabilities": sorted(tools.capabilities(name)),
                 }
             )
-        routing = {
-            cap: [s.id for s in asm.service.sources_for(cap)]  # type: ignore[arg-type]
-            for cap in ("quote", "kline", "financial")
-        }
+        # cap 显式标注为 Capability：写错能力名（如 "k_lines"）会在类型检查阶段报错，
+        # 而不是静默返回空列表让前端对着一张空的 routing 表猜原因。
+        caps: tuple[Capability, ...] = ("quote", "kline", "financial")
+        routing = {cap: [s.id for s in asm.service.sources_for(cap)] for cap in caps}
         return {"sources": asm.service.source_ids, "routing": routing, "tools": out_tools}
 
     @app.get("/api/sessions")
@@ -275,11 +318,13 @@ def create_app() -> FastAPI:
         except SessionError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-        if _RUNS.session_busy(session.id):
+        # 先同步占位再返回响应：check 与 set 之间没有 await，
+        # 两个并发请求不可能同时占住同一个会话（→ 409）。
+        run_id = new_run_id()
+        if not _RUNS.reserve(session.id, run_id):
             raise HTTPException(status_code=409, detail="该会话已有一个正在运行的任务")
 
-        run_id = new_run_id()
-        asm = _assemble(settings)
+        asm = _get_asm(settings)
 
         async def event_stream():
             # 与 _run_turn（cli.py）同构：trace 照落，事件扇出给一个队列桥
@@ -296,7 +341,7 @@ def create_app() -> FastAPI:
                     session_id=session.id,
                 )
             )
-            _RUNS.start(session.id, run_id, run_task)
+            _RUNS.attach(run_id, run_task)
             run_task.add_done_callback(lambda _t: queue.put_nowait(_DONE))
 
             try:
@@ -341,12 +386,11 @@ def create_app() -> FastAPI:
                         },
                     )
             finally:
-                # 浏览器断开 / 服务端异常时，别让内核任务悬着
+                # 浏览器断开 / 服务端异常时，别让内核任务悬着。
+                # llm / service 是共享装配，不在这里关——lifespan 统一收尾。
                 if not run_task.done():
                     run_task.cancel()
                 _RUNS.finish(run_id)
-                await asm.llm.aclose()
-                await asm.service.aclose()
 
         return StreamingResponse(
             event_stream(),
