@@ -176,8 +176,9 @@ class AgentRuntime:
                     EventType.ASSISTANT_MESSAGE,
                     turn=turn,
                     text=response.text,
+                    # id 必须进 journal：恢复时靠它把 tool_call 与结果对上账
                     tool_calls=[
-                        {"name": call.name, "arguments": call.arguments}
+                        {"id": call.id, "name": call.name, "arguments": call.arguments}
                         for call in response.tool_calls
                     ],
                 )
@@ -232,7 +233,10 @@ class AgentRuntime:
         assistant 已经声明了这些调用，少一条就是协议非法。
         """
         for call in response.tool_calls:
-            emitter.emit(EventType.TOOL_CALL, turn=turn, name=call.name, arguments=call.arguments)
+            emitter.emit(
+                EventType.TOOL_CALL, turn=turn, name=call.name, arguments=call.arguments,
+                tool_call_id=call.id,
+            )
 
             breaker = guard.check(call)
             if breaker is not None:
@@ -243,6 +247,7 @@ class AgentRuntime:
                     name=call.name,
                     reason=breaker.reason,
                     message=breaker.message,
+                    tool_call_id=call.id,
                 )
                 messages.append(
                     Message(
@@ -292,6 +297,11 @@ class AgentRuntime:
                 original_chars=result.meta.get("content_chars", len(result.content)),
                 artifact=artifact,
                 preview=result.content[:RESULT_PREVIEW_CHARS],
+                # 恢复专用字段：journal 要能重建出协议合法的 transcript，
+                # 必须有完整结果原文和与 tool_call 对账的 id。
+                # SSE 帧会把 content 剔掉（webapi），前端只用 preview。
+                tool_call_id=call.id,
+                content=result.content,
             )
 
     async def _call_llm(

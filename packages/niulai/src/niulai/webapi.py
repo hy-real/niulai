@@ -35,13 +35,16 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
+from .agent.loop import _repair_transcript
 from .cli import Assembly, _assemble
 from .config import Settings
 from .datasource.base import Capability
 from .errors import ConfigError
-from .events import EventEmitter, new_run_id
+from .events import EventEmitter, EventType, new_run_id
+from .llm import Usage
+from .paths import trace_dir
 from .session import SessionError, SessionStore
-from .trace import TraceWriter
+from .trace import TraceResumeError, TraceWriter, load_transcript, read_trace
 
 DEFAULT_PORT = 8710
 
@@ -109,6 +112,30 @@ _RUNS = _RunRegistry()
 
 _ALLOWED_HOSTS = {"127.0.0.1", "localhost", "testserver", "testserver.local"}
 # testserver 是 fastapi TestClient 的默认 Host，单测要用
+
+
+def _find_interrupted_journal(session_id: str) -> tuple[Path, dict[str, Any]] | None:
+    """该会话最近一次**未收尾** run 的 journal（§7.13 恢复数据源）。
+
+    只看最新一条匹配的 run：如果它已正常收尾，更早的中断也视为过期 ——
+    恢复必须发生在对话末尾，往历史中间插消息会破坏顺序。
+    """
+    d = trace_dir()
+    if not d.is_dir():
+        return None
+    files = sorted(d.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in files[:100]:  # 本地单用户，扫最近 100 条足够
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                head = json.loads(fh.readline())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if head.get("type") != "run_start" or head.get("session_id") != session_id:
+            continue
+        if any(r.get("type") == "run_end" for r in read_trace(path)):
+            return None
+        return path, head
+    return None
 
 
 class RunRequest(BaseModel):
@@ -251,6 +278,64 @@ def create_app() -> FastAPI:
             "messages": _history_view(session.messages),
         }
 
+    def _recoverable(session) -> tuple[Path, dict[str, Any]] | None:
+        """可恢复的现场 = 未收尾 run，且比会话最后一次落盘新。
+
+        第二个条件挡住过期残留：中断之后若又跑完过新 run，把旧现场恢复
+        回来等于往对话历史中间插消息。GET 检测与 POST 恢复必须用同一份
+        判定 —— 之前只挡 GET，结果"界面说没有、接口却能恢复"。
+        """
+        found = _find_interrupted_journal(session.id)
+        if found is None:
+            return None
+        path, head = found
+        session_file = store.directory / f"{session.id}.json"
+        if session_file.exists() and path.stat().st_mtime < session_file.stat().st_mtime:
+            return None
+        return path, head
+
+    @app.get("/api/sessions/{session_id}/interrupted")
+    def api_interrupted(session_id: str):
+        """该会话是否有未收尾的 run（断线 / 崩溃 / 关窗口留下的现场）。"""
+        try:
+            session = store.load(session_id)
+        except SessionError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        found = _recoverable(session)
+        if found is None:
+            return {"interrupted": False}
+        _path, head = found
+        return {"interrupted": True, "run_id": head.get("run_id"), "task": head.get("task")}
+
+    @app.post("/api/sessions/{session_id}/resume")
+    def api_resume_session(session_id: str):
+        """把被中断的 run 恢复进会话：journal 重建 → 补「结果未知」→ 存盘。"""
+        try:
+            session = store.load(session_id)
+        except SessionError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        found = _recoverable(session)
+        if found is None:
+            raise HTTPException(status_code=404, detail="该会话没有可恢复的中断任务")
+        path, _head = found
+        try:
+            plan = load_transcript(path)
+        except TraceResumeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not plan.interrupted:
+            raise HTTPException(status_code=409, detail="该 run 已正常结束，无需恢复")
+
+        repaired = _repair_transcript(plan.messages)
+        session.messages = [*session.messages, *plan.messages]
+        session.note_run(plan.run_id, Usage())
+        store.save(session)
+        return {
+            "ok": True,
+            "run_id": plan.run_id,
+            "repaired": repaired,
+            "messages": _history_view(session.messages),
+        }
+
     @app.get("/api/config")
     def api_get_config():
         """当前生效的配置（env 与 config.toml 合并后的视图，Key 只回尾号）。"""
@@ -349,8 +434,12 @@ def create_app() -> FastAPI:
                     item = await queue.get()
                     if item is _DONE:
                         break
+                    payload = item.to_dict()
+                    if item.type is EventType.TOOL_RESULT:
+                        # 完整结果只进 journal（恢复用）；SSE 帧给 preview 就够
+                        payload.pop("content", None)
                     # 每帧注入 session_id：前端据此把事件路由到对应会话的视图
-                    yield _sse_frame(item.type.value, {**item.to_dict(), "session_id": session.id})
+                    yield _sse_frame(item.type.value, {**payload, "session_id": session.id})
 
                 try:
                     result = run_task.result()

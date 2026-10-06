@@ -4,7 +4,8 @@
 
 1. **调试** —— 出问题不用重跑，直接看轨迹；
 2. **演示** —— 不填 API Key 也能回放一次真实运行（README 的 GIF 就是这么录的）；
-3. **面试** —— 能拿出真实运行记录，讲清楚每一步为什么这么走。
+3. **面试** —— 能拿出真实运行记录，讲清楚每一步为什么这么走；
+4. **恢复（P4）** —— 它同时是 run journal：进程被杀后从这里重建 transcript 续跑。
 
 trace 里**绝不能出现 API Key**：build 事件时只放模型名与用量，不放请求头。
 
@@ -24,11 +25,27 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .errors import NiulaiError
 from .events import UI_ONLY_EVENTS, Event
+from .llm.types import Message, ToolCall
 from .paths import trace_dir
+
+
+class TraceResumeError(NiulaiError):
+    """journal 不具备恢复条件（如旧格式缺对账字段）。"""
+
+
+@dataclass(slots=True)
+class ResumePlan:
+    """从 journal 重建出的恢复计划。"""
+
+    run_id: str
+    messages: list[Message] = field(default_factory=list)  # 不含 system，同 run() 入口契约
+    interrupted: bool = True  # journal 里没有 run_end 记录 = 未正常收尾
 
 
 class TraceWriter:
@@ -99,3 +116,89 @@ def resolve_run(ref: str, directory: Path | None = None) -> Path:
     if not matches:
         raise FileNotFoundError(f"找不到 trace：{ref}（目录 {d}）")
     return matches[0]
+
+
+# ---------------------------------------------------------------------- 恢复
+
+
+def load_transcript(path: Path) -> ResumePlan:
+    """从 journal 重建一次（可能被中断的）run 的 transcript —— §7.13 的恢复数据源。
+
+    重建规则：journal 是事件流的忠实投影（每条消息 append 与 emit 同步发生），
+    所以按事件顺序拼回即得原 transcript。四种事件有用：
+
+    - run_start        → user 消息（task）
+    - assistant_message → assistant 消息（带 tool_calls 时的 id 是对账键）
+    - tool_result      → tool 消息（content 是**完整**结果，恢复必需）
+    - circuit_break    → tool 消息（被拦下的调用也回灌了结果，同样要拼回）
+
+    两个协议不接受"声明了 tool_call 却没有结果"的结尾。进程死在执行中途时，
+    重建出的 transcript 尾部就会有这种悬空 —— 不在这里猜结果，交给
+    `_repair_transcript`（loop.py）按"结果未知"补齐，调用方拿到即可直接续跑。
+    """
+    messages: list[Message] = []
+    run_id = ""
+    interrupted = True
+
+    for record in read_trace(path):
+        kind = record.get("type")
+
+        if kind == "run_start":
+            run_id = str(record.get("run_id") or path.stem)
+            messages.append(Message(role="user", content=str(record.get("task") or "")))
+
+        elif kind == "assistant_message":
+            raw_calls = record.get("tool_calls") or []
+            if any(not c.get("id") for c in raw_calls):
+                raise TraceResumeError(
+                    f"{Path(path).name} 是旧格式（tool_call 缺 id，无法与结果对账），不能恢复。"
+                    "跑一次新版本后产生的 trace 才支持 resume。"
+                )
+            tool_calls = [
+                ToolCall(
+                    id=str(c["id"]),
+                    name=str(c.get("name") or ""),
+                    arguments=str(c.get("arguments") or ""),
+                )
+                for c in raw_calls
+            ]
+            messages.append(
+                Message(
+                    role="assistant",
+                    content=record.get("text") or None,
+                    tool_calls=tool_calls or None,
+                )
+            )
+
+        elif kind == "tool_result":
+            call_id = record.get("tool_call_id")
+            if not call_id:
+                continue  # 旧格式缺对账键：丢掉，尾部由 repair 补"结果未知"
+            messages.append(
+                Message(
+                    role="tool",
+                    content=str(record.get("content") or record.get("preview") or ""),
+                    tool_call_id=str(call_id),
+                    name=str(record.get("name") or "") or None,
+                    is_error=not record.get("ok", True),
+                )
+            )
+
+        elif kind == "circuit_break":
+            call_id = record.get("tool_call_id")
+            if not call_id:
+                continue
+            messages.append(
+                Message(
+                    role="tool",
+                    content=str(record.get("message") or ""),
+                    tool_call_id=str(call_id),
+                    name=str(record.get("name") or "") or None,
+                    is_error=True,
+                )
+            )
+
+        elif kind == "run_end":
+            interrupted = False
+
+    return ResumePlan(run_id=run_id or Path(path).stem, messages=messages, interrupted=interrupted)

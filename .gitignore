@@ -38,4 +38,5 @@ apps/desktop/dist/
 # .workbuddy/ 存的是项目记忆与工作日志，只在本地保留。
 # 注意：不要删这个目录，它是有用的项目数据，只是不该被 git 跟踪。
 .workbuddy/
+.codebuddy/
 .tmp*/

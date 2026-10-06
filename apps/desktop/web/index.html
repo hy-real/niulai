@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Niulai — 本地 A 股助手</title>
+<style>
+  :root { --bg:#f7f8fa; --panel:#ffffff; --panel2:#eef1f5; --border:#e4e8ef; --border2:#d3dae3;
+          --text:#232b38; --muted:#8a94a6; --dim:#c2cad6;
+          --accent:#d64550; --up:#e0344a; --down:#2e9e63;
+          --green:#2e9e63; --red:#e0344a; --yellow:#c98a1b;
+          --mono:"JetBrains Mono","Cascadia Code",Consolas,Menlo,monospace;
+          --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  * { box-sizing:border-box; margin:0; }
+  ::selection { background:var(--accent); color:#fff; }
+  ::-webkit-scrollbar { width:8px; height:8px; }
+  ::-webkit-scrollbar-thumb { background:var(--border2); border-radius:4px; }
+  ::-webkit-scrollbar-thumb:hover { background:var(--muted); }
+  body { background:var(--bg); color:var(--text); height:100vh; display:flex;
+         font:14px/1.7 var(--sans); }
+
+  /* ---------- 侧栏 ---------- */
+  #sidebar { width:250px; background:var(--panel); border-right:1px solid var(--border);
+             display:flex; flex-direction:column; padding:14px 10px; gap:10px; }
+  .brand { font-size:14px; font-weight:700; padding:2px 8px; letter-spacing:1px; }
+  .brand span { background:linear-gradient(90deg,var(--up),#ff8a5c);
+                -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .sidebtn { display:flex; gap:6px; }
+  .sidebtn button { flex:1; background:var(--panel); color:var(--text); border:1px solid var(--border);
+                    border-radius:6px; padding:7px 8px; cursor:pointer; font:12.5px var(--sans); }
+  .sidebtn button:hover { border-color:var(--accent); color:var(--accent); }
+  #sessions { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:2px; }
+  .sess { padding:7px 10px; cursor:pointer; border-left:2px solid transparent; border-radius:4px; }
+  .sess:hover { background:var(--panel2); }
+  .sess.active { background:var(--panel2); border-left-color:var(--accent); }
+  .sess .t { font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sess .m { font-size:11px; color:var(--muted); font-family:var(--mono); }
+  .sidefoot { font-size:11px; color:var(--dim); padding:0 8px; }
+
+  /* ---------- 顶栏：行情软件式信息条 ---------- */
+  #topbar { display:flex; justify-content:space-between; align-items:center; padding:10px 20px;
+            border-bottom:1px solid var(--border); background:var(--panel); }
+  .ttitle { display:flex; align-items:center; font-weight:600; font-size:13.5px; }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--down); display:inline-block;
+         margin-right:9px; animation:pulse 2.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity:1; box-shadow:0 0 0 0 rgba(46,158,99,.4); }
+                     50% { opacity:.45; box-shadow:0 0 0 5px rgba(46,158,99,0); } }
+  .tinfo { font-size:11.5px; color:var(--muted); font-family:var(--mono); }
+
+  /* ---------- 恢复提示条 ---------- */
+  #resumebar { display:none; align-items:center; justify-content:space-between; gap:10px;
+               padding:8px 20px; background:#fdf6e9; border-bottom:1px solid #e8d9b0;
+               font-size:12.5px; color:#7a6420; }
+  #resumebar.show { display:flex; }
+  #resumebar .task { font-weight:600; }
+  #resumebar button { background:var(--panel); border:1px solid var(--border2); color:var(--text);
+                      border-radius:6px; padding:4px 12px; font:12px var(--sans); cursor:pointer; }
+  #resumebar #resumeBtn { border-color:var(--yellow); color:var(--yellow); font-weight:600; }
+  #resumebar #resumeBtn:hover { background:var(--yellow); color:#fff; }
+
+  /* ---------- 聊天区 ---------- */
+  #main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #chatwrap { flex:1; position:relative; display:flex; min-height:0; }
+  #chat { flex:1; overflow-y:auto; padding:20px 26px; display:flex; flex-direction:column; gap:15px; }
+  .user, .assistant { max-width:88%; white-space:pre-wrap; padding:1px 0 1px 13px; }
+  .user { border-left:2px solid var(--dim); }
+  .user::before { content:"❯ YOU"; display:block; font-size:10.5px; letter-spacing:1.5px;
+                  color:var(--muted); margin-bottom:1px; font-family:var(--mono); }
+  .assistant { border-left:2px solid var(--accent); }
+  .assistant::before { content:"● NIULAI"; display:block; font-size:10.5px; letter-spacing:1.5px;
+                       color:var(--accent); margin-bottom:1px; font-family:var(--mono); }
+  .line { color:var(--muted); font-size:12px; padding-left:15px; }
+  .tool { align-self:flex-start; background:var(--panel); border:1px solid var(--border);
+          border-radius:6px; padding:8px 12px; font-size:12.5px; max-width:92%;
+          box-shadow:0 1px 2px rgba(31,43,56,.05); }
+  .tool .head { color:var(--accent); font-family:var(--mono); }
+  .tool .prev { color:var(--muted); margin-top:5px; padding-top:5px; border-top:1px dashed var(--border);
+                white-space:pre-wrap; word-break:break-all; font-family:var(--mono); font-size:11.5px; }
+  .ok { color:var(--down); } .err { color:var(--up); } .warn { color:var(--yellow); }
+
+  /* ---------- 空状态：K 线 ASCII + 快捷提问 ---------- */
+  #empty { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
+           justify-content:center; gap:12px; pointer-events:none; }
+  #empty .candles { font-family:var(--mono); font-size:26px; letter-spacing:4px;
+    background:linear-gradient(90deg,var(--up),#ff8a5c,var(--down));
+    -webkit-background-clip:text; background-clip:text; color:transparent; }
+  #empty .etitle { color:var(--muted); font-size:13.5px; }
+  .chips { display:flex; gap:8px; margin-top:4px; pointer-events:auto; flex-wrap:wrap;
+           justify-content:center; }
+  .chip { background:var(--panel); border:1px solid var(--border); color:var(--muted);
+          border-radius:999px; padding:6px 15px; font:12.5px var(--sans); cursor:pointer; }
+  .chip:hover { border-color:var(--accent); color:var(--accent); }
+
+  /* ---------- 输入区 ---------- */
+  #composer { display:flex; gap:8px; padding:13px 20px; border-top:1px solid var(--border);
+              background:var(--panel); align-items:stretch; }
+  #promptline { flex:1; display:flex; align-items:flex-start; gap:9px; background:var(--panel);
+                border:1px solid var(--border2); border-radius:8px; padding:10px 13px; }
+  #promptline::before { content:"❯"; color:var(--accent); font-family:var(--mono); font-weight:600; }
+  #promptline:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px rgba(214,69,80,.10); }
+  #input { flex:1; border:0; background:transparent; color:var(--text); resize:none;
+           font:14px/1.6 var(--sans); outline:none; height:44px; padding:0; }
+  #input::placeholder { color:var(--dim); }
+  #send { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:0 20px;
+          font:13px var(--sans); cursor:pointer; }
+  #send:hover:not(:disabled) { background:#c23a45; }
+  #send:disabled { opacity:.4; cursor:default; }
+  #stop { display:none; background:var(--panel); color:var(--muted); border:1px solid var(--border2);
+          border-radius:8px; padding:0 18px; font:13px var(--sans); cursor:pointer; }
+  #stop:hover { border-color:var(--up); color:var(--up); }
+
+  /* ---------- 设置弹窗 ---------- */
+  #overlay { position:fixed; inset:0; background:rgba(35,43,56,.35); display:none;
+             align-items:center; justify-content:center; z-index:10; }
+  #overlay.show { display:flex; }
+  #settings { width:460px; background:var(--panel); border:1px solid var(--border); border-radius:12px;
+              padding:20px 22px; max-height:88vh; overflow-y:auto;
+              box-shadow:0 12px 40px rgba(31,43,56,.18); }
+  #settings h2 { font-size:14px; font-weight:700; color:var(--accent); margin-bottom:4px; }
+  #settings .hint { color:var(--muted); font-size:11.5px; margin-bottom:14px; padding-bottom:10px;
+                    border-bottom:1px solid var(--border); }
+  .field { margin-bottom:10px; }
+  .field label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
+  .field input, .field select { width:100%; background:var(--panel); color:var(--text);
+      border:1px solid var(--border2); border-radius:6px; padding:7px 10px;
+      font:12.5px var(--mono); outline:none; }
+  .field input:focus, .field select:focus { border-color:var(--accent);
+      box-shadow:0 0 0 3px rgba(214,69,80,.10); }
+  .row2 { display:flex; gap:10px; } .row2 .field { flex:1; }
+  .actions { display:flex; justify-content:flex-end; gap:10px; margin-top:14px; }
+  .actions button { padding:7px 18px; border-radius:6px; font:13px var(--sans); cursor:pointer; }
+  #cancelCfg { background:var(--panel); border:1px solid var(--border2); color:var(--text); }
+  #cancelCfg:hover { border-color:var(--muted); }
+  #saveCfg { background:var(--accent); color:#fff; border:0; }
+  #saveCfg:hover { background:#c23a45; }
+  #saveNote { color:var(--green); font-size:12.5px; margin-top:8px; display:none; }
+</style>
+</head>
+<body>
+<aside id="sidebar">
+  <div class="brand">🐂 <span>NIULAI</span></div>
+  <div class="sidebtn">
+    <button id="newChat" type="button">＋ 新会话</button>
+    <button id="settingsBtn" type="button" title="设置">⚙ 设置</button>
+  </div>
+  <div id="sessions"></div>
+  <div class="sidefoot">v0.1 · 本地优先 · 数据不出机器</div>
+</aside>
+
+<main id="main">
+  <header id="topbar">
+    <div class="ttitle"><span class="dot"></span><span id="sessTitle">新会话</span></div>
+    <div class="tinfo" id="info"></div>
+  </header>
+  <div id="resumebar">
+    <span>⚠ 上次任务没有跑完：<span class="task" id="resumeTask"></span></span>
+    <span style="display:flex; gap:6px;">
+      <button id="resumeBtn" type="button">恢复现场</button>
+      <button id="resumeDismiss" type="button">忽略</button>
+    </span>
+  </div>
+  <div id="chatwrap">
+    <div id="chat"></div>
+    <div id="empty">
+      <pre class="candles">▁▃▂▅▇▆▄▆█▅▂▄▃</pre>
+      <div class="etitle">今天想看点什么行情？</div>
+      <div class="chips">
+        <button class="chip" type="button">贵州茅台现在多少钱</button>
+        <button class="chip" type="button">五粮液最近一个月走势</button>
+        <button class="chip" type="button">茅台最新一期财报</button>
+      </div>
+    </div>
+  </div>
+  <form id="composer">
+    <div id="promptline">
+      <textarea id="input" placeholder="问点什么，例如：贵州茅台现在多少钱　（Enter 发送 / Shift+Enter 换行）"></textarea>
+    </div>
+    <button id="send" type="submit">发送</button>
+    <button id="stop" type="button">■ 停止</button>
+  </form>
+</main>
+
+<div id="overlay">
+  <div id="settings">
+    <h2>设置</h2>
+    <div class="hint">写入 ~/.niulai/config.toml，下一条提问即生效；若终端设了 NIULAI_* 环境变量则以环境变量优先</div>
+    <div class="field"><label>协议</label>
+      <select id="cfg_protocol">
+        <option value="openai">openai（DeepSeek / 通义 / Kimi 等兼容接口）</option>
+        <option value="anthropic">anthropic</option>
+      </select>
+    </div>
+    <div class="field"><label>接入点 base_url（清空 = 用协议默认值）</label>
+      <input id="cfg_base_url" placeholder="如 https://api.moonshot.cn/v1"></div>
+    <div class="field"><label>模型 model（清空 = 用协议默认值）</label>
+      <input id="cfg_model" placeholder="如 moonshot-v1-8k"></div>
+    <div class="field"><label>API Key（留空 = 不修改）</label>
+      <input id="cfg_key" type="password"></div>
+    <div class="row2">
+      <div class="field"><label>单次提问最大轮数</label>
+        <input id="cfg_max_turns" type="number" min="1"></div>
+      <div class="field"><label>工具超时（秒）</label>
+        <input id="cfg_tool_timeout_s" type="number" min="1" step="0.5"></div>
+    </div>
+    <div class="field"><label>保留最近工具结果条数</label>
+      <input id="cfg_keep_recent_tool_results" type="number" min="0"></div>
+    <div class="actions">
+      <button id="cancelCfg" type="button">取消</button>
+      <button id="saveCfg" type="button">保存</button>
+    </div>
+    <div id="saveNote">✓ 已保存，下一条提问即生效</div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const chat = document.getElementById('chat');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const stopBtn = document.getElementById('stop');
+const sessionsEl = document.getElementById('sessions');
+const overlay = document.getElementById('overlay');
+let sessionId = null, activeId = null;
+let bubble = null, lastCard = null;
+const busySet = new Set();   // 正在跑 run 的 sessionId（null = 尚未落库的新会话）
+const streams = new Map();   // sessionId -> { runId, aborter, buffer: [[事件名, 数据]] }
+
+fetch('/api/tools').then(r => r.json()).then(d => {
+  document.getElementById('info').textContent =
+    '数据源 ' + d.sources.join('、') + ' · 工具 ' + d.tools.length + ' 个';
+}).catch(() => {});
+
+function el(cls, text) {
+  const d = document.createElement('div'); d.className = cls;
+  if (text !== undefined) d.textContent = text;
+  chat.appendChild(d); chat.scrollTop = chat.scrollHeight;
+  updateEmpty();
+  return d;
+}
+function updateEmpty() {
+  document.getElementById('empty').style.display = chat.children.length ? 'none' : 'flex';
+}
+function scroll() { chat.scrollTop = chat.scrollHeight; }
+function refreshInputState() {
+  const b = busySet.has(sessionId);
+  sendBtn.disabled = b; input.disabled = b;
+  stopBtn.style.display = b ? '' : 'none';
+}
+
+/* ---------- 会话列表与历史 ---------- */
+
+function loadSessions() {
+  fetch('/api/sessions').then(r => r.json()).then(list => {
+    sessionsEl.innerHTML = '';
+    list.forEach(s => {
+      const d = document.createElement('div');
+      d.className = 'sess' + (s.id === activeId ? ' active' : '');
+      const t = document.createElement('div'); t.className = 't'; t.textContent = s.title;
+      const m = document.createElement('div'); m.className = 'm';
+      m.textContent = (s.updated_at || '').slice(5, 16).replace('T', ' ') + ' · '
+        + (s.total_tokens || 0).toLocaleString() + ' tk';
+      d.appendChild(t); d.appendChild(m);
+      d.addEventListener('click', () => openSession(s.id));
+      sessionsEl.appendChild(d);
+    });
+  }).catch(() => {});
+}
+
+function renderHistoryMessage(m) {
+  if (m.role === 'user') { el('user', m.content); return; }
+  if (m.role === 'assistant') {
+    if (m.content) el('assistant', m.content);
+    (m.tool_calls || []).forEach(c => {
+      const card = el('tool');
+      const h = document.createElement('div'); h.className = 'head';
+      h.textContent = '⚙ ' + c.name + '(' + c.arguments + ')';
+      card.appendChild(h);
+    });
+    return;
+  }
+  if (m.role === 'tool') {
+    const card = el('tool');
+    const h = document.createElement('div'); h.className = 'head';
+    h.textContent = (m.is_error ? '✗ ' : '✓ ') + (m.name || 'tool');
+    card.appendChild(h);
+    if (m.content) {
+      const p = document.createElement('div'); p.className = 'prev';
+      p.textContent = m.content;
+      card.appendChild(p);
+    }
+  }
+}
+
+function openSession(id) {
+  fetch('/api/sessions/' + encodeURIComponent(id)).then(r => r.json()).then(s => {
+    activeId = id; sessionId = id;
+    document.getElementById('sessTitle').textContent = s.title;
+    chat.innerHTML = ''; bubble = null; lastCard = null;
+    el('line', '▸ 会话：' + s.title);
+    (s.messages || []).forEach(renderHistoryMessage);
+    // 该会话若有进行中的流：重放缓冲的实时事件，接着继续实时接收
+    const st = streams.get(id);
+    if (st && st.buffer.length) {
+      el('line', '▸ 本会话有正在进行的任务，以下为实时内容：');
+      st.buffer.forEach(([n, d]) => handle(n, d));
+      st.buffer = [];
+    }
+    refreshInputState();
+    loadSessions(); scroll();
+    checkInterrupted(id);
+  }).catch(() => {});
+}
+
+/* ---------- 中断恢复 ---------- */
+
+const dismissedRuns = new Set();   // 用户点过"忽略"的会话，本次页面会话内不再打扰
+
+function checkInterrupted(id) {
+  const bar = document.getElementById('resumebar');
+  fetch('/api/sessions/' + encodeURIComponent(id) + '/interrupted').then(r => r.json()).then(d => {
+    if (d.interrupted && !dismissedRuns.has(id)) {
+      document.getElementById('resumeTask').textContent = d.task || d.run_id || '';
+      bar.classList.add('show');
+    } else {
+      bar.classList.remove('show');
+    }
+  }).catch(() => bar.classList.remove('show'));
+}
+
+document.getElementById('resumeBtn').addEventListener('click', () => {
+  if (!activeId) return;
+  fetch('/api/sessions/' + encodeURIComponent(activeId) + '/resume', { method: 'POST' })
+    .then(r => r.json().then(j => ({ ok: r.ok, j })))
+    .then(({ ok, j }) => {
+      const bar = document.getElementById('resumebar');
+      bar.classList.remove('show');
+      if (ok) openSession(activeId);   // 重开会话，恢复出的消息直接走历史渲染
+      else el('line err', '· 恢复失败：' + (j.detail || '未知错误'));
+    })
+    .catch(() => {});
+});
+document.getElementById('resumeDismiss').addEventListener('click', () => {
+  if (activeId) dismissedRuns.add(activeId);
+  document.getElementById('resumebar').classList.remove('show');
+});
+
+document.getElementById('newChat').addEventListener('click', () => {
+  sessionId = null; activeId = null;
+  document.getElementById('sessTitle').textContent = '新会话';
+  chat.innerHTML = ''; bubble = null; lastCard = null;
+  document.getElementById('resumebar').classList.remove('show');
+  el('line', '▸ 新会话（第一条提问发送后自动保存）');
+  loadSessions();
+});
+
+/* ---------- 事件渲染（与 cli.py 的 ConsoleRenderer 同一张对照表） ---------- */
+
+function handle(name, d) {
+  if (name === 'run_start') { el('user', d.task); return; }
+  if (name === 'turn_start') {
+    bubble = null;
+    el('line', '· 本问第 ' + d.turn + ' 轮'
+      + (d.tools_enabled ? '' : '（收口：不再调用工具）')
+      + (d.context_omitted ? '（已压缩 ' + d.context_omitted + ' 条历史工具结果）' : ''));
+  } else if (name === 'text_delta') {
+    if (!bubble) bubble = el('assistant', '');
+    bubble.textContent += d.text; scroll();
+  } else if (name === 'assistant_message') {
+    bubble = null;  // 完整消息已由 text_delta 流出，这里只收尾
+  } else if (name === 'tool_call') {
+    bubble = null;
+    lastCard = el('tool');
+    const head = document.createElement('div'); head.className = 'head';
+    head.textContent = '⚙ ' + d.name + '(' + d.arguments + ')';
+    lastCard.appendChild(head);
+  } else if (name === 'tool_result') {
+    if (lastCard) {
+      const st = document.createElement('div'); st.className = d.ok ? 'ok' : 'err';
+      let t = (d.ok ? '✓ ' : '✗ ') + d.name + ' 返回 ' + d.content_chars + ' 字符';
+      if (d.original_chars && d.original_chars !== d.content_chars)
+        t += '（原始 ' + d.original_chars.toLocaleString() + '，已落盘）';
+      st.textContent = t; lastCard.appendChild(st);
+      if (d.preview) {
+        const p = document.createElement('div'); p.className = 'prev';
+        p.textContent = d.preview.slice(0, 300); lastCard.appendChild(p);
+      }
+      lastCard = null;
+    }
+  } else if (name === 'circuit_break') {
+    bubble = null; el('line warn', '⛔ 熔断：' + d.name + ' 已被拦下，未执行');
+  } else if (name === 'artifact') {
+    el('line', '📄 结果过大已落盘：' + d.path + '（' + (d.content_chars || 0).toLocaleString() + ' 字符）');
+  } else if (name === 'error') {
+    el('line err', '! ' + d.kind + ': ' + d.message);
+  } else if (name === 'run_result') {
+    sessionId = d.session_id || sessionId;
+    const labels = { done: '正常结束', max_turns: '达到轮数上限',
+                     cancelled: '已取消', error: '运行出错' };
+    let meta = '— ' + (labels[d.stop_reason] || d.stop_reason || '结束');
+    if (d.turns) meta += ' · ' + d.turns + ' 轮';
+    if (d.usage && d.usage.total_tokens) meta += ' · ' + d.usage.total_tokens.toLocaleString() + ' tokens';
+    el('line', meta);
+    loadSessions();
+  }
+}
+
+/* ---------- 发送与 SSE 解析 ---------- */
+
+async function send() {
+  const task = input.value.trim();
+  if (!task || busySet.has(sessionId)) return;
+  busySet.add(sessionId); refreshInputState();
+  input.value = '';
+  bubble = null; lastCard = null;
+  const aborter = new AbortController();
+  const entry = { runId: null, aborter, buffer: [] };
+  let sid = sessionId;   // 流所属会话；新会话在首帧拿到真实 id 后归档
+  streams.set(sid, entry);
+  try {
+    const res = await fetch('/api/runs', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: task, session_id: sessionId }),
+      signal: aborter.signal
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      if (sid === activeId) el('line err', '· ' + (err.detail || ('HTTP ' + res.status)));
+      return;
+    }
+    const reader = res.body.getReader(), decoder = new TextDecoder('utf-8');
+    let buf = '';
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buf += decoder.decode(chunk.value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        let evName = 'message', dataText = '';
+        for (const ln of block.split('\n')) {
+          if (ln.startsWith('event:')) evName = ln.slice(6).trim();
+          else if (ln.startsWith('data:')) dataText += ln.slice(5).trim();
+        }
+        if (!dataText) continue;
+        let d; try { d = JSON.parse(dataText); } catch (e) { continue; }
+        if (sid === null && d.session_id) {   // 新会话落库：按真实 id 重新归档
+          sid = d.session_id;
+          streams.delete(null); busySet.delete(null);
+          streams.set(sid, entry); busySet.add(sid);
+          refreshInputState();
+        }
+        // 路由：正在看的会话实时渲染，后台会话进缓冲区
+        if (sid === activeId) handle(evName, d);
+        else entry.buffer.push([evName, d]);
+        if (evName === 'run_result') {
+          busySet.delete(sid); streams.delete(sid);
+          refreshInputState(); loadSessions();
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError' && sid === activeId)
+      el('line err', '· 连接中断：' + e.message);
+  } finally {
+    // 409 / 400 / 断网 / 点停止：这些都收不到 run_result 帧。
+    // 无论以哪种方式结束都释放占位，否则输入框会被永久锁死。
+    busySet.delete(sid);
+    if (streams.get(sid) === entry) streams.delete(sid);
+    refreshInputState();
+  }
+}
+
+stopBtn.addEventListener('click', () => {
+  const st = streams.get(activeId);
+  if (st && st.runId) fetch('/api/runs/' + st.runId + '/cancel', { method: 'POST' }).catch(() => {});
+  if (st && st.aborter) st.aborter.abort();
+});
+document.getElementById('composer').addEventListener('submit', e => { e.preventDefault(); send(); });
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+/* ---------- 设置面板 ---------- */
+
+document.getElementById('settingsBtn').addEventListener('click', () => {
+  fetch('/api/config').then(r => r.json()).then(c => {
+    document.getElementById('cfg_protocol').value = c.protocol || 'openai';
+    document.getElementById('cfg_base_url').value = c.base_url || '';
+    document.getElementById('cfg_model').value = c.model || '';
+    document.getElementById('cfg_key').value = '';
+    document.getElementById('cfg_key').placeholder = c.key_hint || '';
+    document.getElementById('cfg_max_turns').value = c.max_turns;
+    document.getElementById('cfg_tool_timeout_s').value = c.tool_timeout_s;
+    document.getElementById('cfg_keep_recent_tool_results').value = c.keep_recent_tool_results;
+    const note = document.getElementById('saveNote');
+    note.textContent = '✓ 已保存，下一条提问即生效'; note.style.display = 'none';
+    overlay.classList.add('show');
+  }).catch(() => {});
+});
+document.getElementById('cancelCfg').addEventListener('click', () => overlay.classList.remove('show'));
+overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.remove('show'); });
+document.getElementById('saveCfg').addEventListener('click', () => {
+  const num = id => {
+    const v = document.getElementById(id).value.trim();
+    return v === '' ? null : Number(v);
+  };
+  const body = {
+    protocol: document.getElementById('cfg_protocol').value,
+    base_url: document.getElementById('cfg_base_url').value.trim(),
+    model: document.getElementById('cfg_model').value.trim(),
+    api_key: document.getElementById('cfg_key').value,
+    max_turns: num('cfg_max_turns'),
+    tool_timeout_s: num('cfg_tool_timeout_s'),
+    keep_recent_tool_results: num('cfg_keep_recent_tool_results'),
+  };
+  fetch('/api/config', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(r => r.json().then(j => ({ ok: r.ok, j }))).then(({ ok, j }) => {
+    const note = document.getElementById('saveNote');
+    note.style.display = '';
+    if (!ok) { note.className = 'err'; note.textContent = '✗ ' + (j.detail || '保存失败'); return; }
+    note.className = ''; note.textContent = '✓ 已保存，下一条提问即生效';
+    setTimeout(() => overlay.classList.remove('show'), 1200);
+  }).catch(() => {});
+});
+
+/* ---------- 启动：快捷提问 + 会话列表 ---------- */
+
+document.querySelectorAll('.chip').forEach(b =>
+  b.addEventListener('click', () => { input.value = b.textContent; send(); }));
+
+loadSessions();
+fetch('/api/sessions').then(r => r.json()).then(list => {
+  if (list.length) openSession(list[0].id);
+}).catch(() => {});
+</script>
+</body>
+</html>

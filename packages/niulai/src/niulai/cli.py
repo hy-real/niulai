@@ -34,10 +34,11 @@ from .config import Settings, read_config_file
 from .datasource import build_default_service
 from .errors import ConfigError, NiulaiError
 from .events import Event, EventEmitter, EventType, new_run_id
-from .llm import build_client
+from .agent.loop import _repair_transcript
+from .llm import Usage, build_client
 from .logs import setup_logging
 from .session import Session, SessionStore
-from .trace import TraceWriter, read_trace, resolve_run
+from .trace import TraceResumeError, TraceWriter, load_transcript, read_trace, resolve_run
 from .tools import ReadFileTool, ToolRegistry, build_stock_tools
 
 STOP_REASON_LABEL = {
@@ -636,6 +637,47 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------
+# resume
+# --------------------------------------------------------------------------
+
+
+def _cmd_resume(args: argparse.Namespace) -> int:
+    """从被中断的 run 恢复：journal → transcript → 可续聊的会话。
+
+    v1 边界（诚实挂账，见 architecture.md 7.13）：usage 不跨恢复累计、
+    续跑用的是**当前**配置而非崩溃时的快照 —— 这两项等 SQLite 迁移一起做。
+    """
+    color = Palette(use_color())
+    try:
+        plan = load_transcript(resolve_run(args.run))
+    except FileNotFoundError as exc:
+        print(f"找不到 trace：{exc}", file=sys.stderr)
+        return 1
+    except TraceResumeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if not plan.interrupted:
+        print(color.dim(f"run {plan.run_id} 已正常结束，无需恢复。"
+                        "要继续对话请用 `niulai chat --resume <session_id>`。"))
+        return 0
+
+    store = SessionStore()
+    session = store.create()
+    session.messages = plan.messages
+    session.note_run(plan.run_id, Usage())
+    saved = store.save(session)
+
+    repaired = _repair_transcript(session.messages)
+    note = f"，其中 {repaired} 条中断的工具结果按「结果未知」补回" if repaired else ""
+    print(color.bold(f"已从 run {plan.run_id} 恢复"))
+    print(color.dim(f"· 重建 {len(plan.messages)} 条消息{note}"))
+    print(color.dim(f"· 会话已保存 {saved}"))
+    print(color.dim(f"· 继续对话：niulai chat --resume {session.id}"))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="niulai", description="本地优先的 A 股 AI 助手")
     parser.add_argument("--version", action="version", version=f"niulai {__version__}")
@@ -681,6 +723,9 @@ def build_parser() -> argparse.ArgumentParser:
     replay = sub.add_parser("replay", help="回放一次运行的轨迹")
     replay.add_argument("run", help="run_id / trace 文件路径 / latest")
 
+    resume = sub.add_parser("resume", help="从被中断的 run 恢复出可续聊的会话")
+    resume.add_argument("run", nargs="?", default="latest", help="run_id / trace 路径 / latest（默认最近一次）")
+
     sessions = sub.add_parser("sessions", help="列出历史会话")
     sessions.add_argument("--limit", type=int, default=20, help="最多列几条")
 
@@ -709,6 +754,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "ask":
             return asyncio.run(_cmd_ask(args))
+        if args.command == "resume":
+            return _cmd_resume(args)
         if args.command == "chat":
             return asyncio.run(_cmd_chat(args))
         if args.command == "replay":

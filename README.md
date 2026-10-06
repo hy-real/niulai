@@ -88,6 +88,7 @@ niulai chat --resume <session_id>  # 续接指定会话
 niulai sessions                    # 列出历史会话
 niulai ask "..." --json            # 每行输出一个事件 JSON，便于管道处理
 niulai replay latest               # 回放最近一次运行的完整轨迹
+niulai resume latest               # 从被中断的 run 恢复出可续聊的会话
 niulai tools                       # 列出工具、数据源与各自的能力声明
 ```
 

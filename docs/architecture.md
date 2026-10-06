@@ -411,6 +411,14 @@ created ──▶ running ──┬──▶ completed
 
 这是"至少一次投递"在 agent 里的翻版 —— 传统后端天天处理，agent 领域少见，**是很好的差异点**。
 
+**落地状态（2026-10-06）**：journal 完整化 + `niulai resume` 已实现 ——
+TOOL_RESULT / CIRCUIT_BREAK 事件携带完整结果与 `tool_call_id`（SSE 帧剔除 content，只进 journal）；
+`trace.load_transcript()` 按事件顺序重建 transcript（崩溃截断由既有残行容忍逻辑处理），
+"有声明无结果"交给既有的 `_repair_transcript` 补「结果未知」—— 幂等判定的两半各就各位。
+旧格式 journal（tool_call 缺 id）明确拒绝恢复，不做静默修复。
+**暂未做**：usage 跨恢复累计、settings 快照（恢复用当前配置续跑）、run 状态机与
+`suspended` 状态、Web 端恢复入口 —— 挂账到 SQLite 迁移与 P7 一起。
+
 ### 7.14 审批中断（HITL）的六条语义
 
 7.12 定的是"谁能执行"，这里定的是"需要人点头时，机制具体怎么运转"。六条都是实现时一定会踩的：

@@ -6,9 +6,16 @@ P3.5 任务级 eval 的范畴；这里守住的是"装配正确、协议不破�
 
 from __future__ import annotations
 
+import json
+import os
+import time
+
 from fastapi.testclient import TestClient
 
 from niulai.config import read_config_file
+from niulai.llm.types import Message
+from niulai.paths import trace_dir
+from niulai.session import SessionStore
 from niulai.webapi import create_app
 
 
@@ -137,3 +144,105 @@ def test_runregistry_reserve是同步占位_防并发穿透():
 
     reg.finish("r1")
     assert reg.reserve("s1", "r4")      # run 结束（或被清理）后占位释放
+
+
+# ---------------------------------------------------------------- 中断恢复端点
+
+
+def _write_journal(session_id: str, *, finished: bool) -> None:
+    """在 trace 目录手工放一份 journal（与内核写入的形状一致）。"""
+    d = trace_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps({"type": "run_start", "run_id": "run-i1", "session_id": session_id,
+                    "task": "茅台多少钱"}, ensure_ascii=False),
+        json.dumps({"type": "assistant_message", "text": "",
+                    "tool_calls": [{"id": "c1", "name": "stock_quote",
+                                    "arguments": "{\"symbol\": \"600519\"}"}]},
+                   ensure_ascii=False),
+        json.dumps({"type": "tool_result", "name": "stock_quote", "ok": True,
+                    "tool_call_id": "c1", "content": "1253.80 元", "preview": "1253.80"},
+                   ensure_ascii=False),
+    ]
+    if finished:
+        lines.append(json.dumps({"type": "run_end", "stop_reason": "done"}, ensure_ascii=False))
+    (d / "run-i1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _make_session(store: SessionStore) -> str:
+    session = store.create()
+    session.messages = [Message(role="user", content="上一轮的问题")]
+    store.save(session)
+    return session.id
+
+
+def test_未收尾run_被检测并可恢复(monkeypatch, tmp_path):
+    monkeypatch.setenv("NIULAI_HOME", str(tmp_path))
+    client = _client(monkeypatch, tmp_path)
+    store = SessionStore()
+    sid = _make_session(store)
+    _write_journal(sid, finished=False)
+
+    data = client.get(f"/api/sessions/{sid}/interrupted").json()
+    assert data["interrupted"] is True
+    assert data["run_id"] == "run-i1"
+    assert data["task"] == "茅台多少钱"
+
+    resp = client.post(f"/api/sessions/{sid}/resume")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["repaired"] == 0  # 工具结果已落 journal，无需补"未知"
+    # 恢复 = 旧历史 + 中断 run 的现场（提问 + 工具调用 + 结果），顺序不乱
+    roles = [m["role"] for m in body["messages"]]
+    assert roles == ["user", "user", "assistant", "tool"]
+    assert body["messages"][1]["content"] == "茅台多少钱"
+    assert body["messages"][3]["content"] == "1253.80 元"
+
+
+def test_中断run_悬空调用被补结果未知(monkeypatch, tmp_path):
+    """journal 里工具没回来：恢复时补「结果未知」，不猜成败。"""
+    monkeypatch.setenv("NIULAI_HOME", str(tmp_path))
+    client = _client(monkeypatch, tmp_path)
+    store = SessionStore()
+    sid = _make_session(store)
+    d = trace_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "run-i2.jsonl").write_text(
+        json.dumps({"type": "run_start", "run_id": "run-i2", "session_id": sid,
+                    "task": "查五粮液"}, ensure_ascii=False) + "\n"
+        + json.dumps({"type": "assistant_message", "text": "",
+                      "tool_calls": [{"id": "c9", "name": "stock_quote", "arguments": "{}"}]},
+                     ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    body = client.post(f"/api/sessions/{sid}/resume").json()
+    assert body["repaired"] == 1
+    tail = body["messages"][-1]
+    assert tail["role"] == "tool" and tail["is_error"] is True
+
+
+def test_已收尾的run_不算中断(monkeypatch, tmp_path):
+    monkeypatch.setenv("NIULAI_HOME", str(tmp_path))
+    client = _client(monkeypatch, tmp_path)
+    sid = _make_session(SessionStore())
+    _write_journal(sid, finished=True)
+    assert client.get(f"/api/sessions/{sid}/interrupted").json() == {"interrupted": False}
+    resp = client.post(f"/api/sessions/{sid}/resume")
+    assert resp.status_code == 404
+
+
+def test_中断后又跑完过新run_残留过期(monkeypatch, tmp_path):
+    """中断现场比会话最后保存还旧：恢复会把消息插进历史中间 —— 拒绝展示。"""
+    monkeypatch.setenv("NIULAI_HOME", str(tmp_path))
+    client = _client(monkeypatch, tmp_path)
+    store = SessionStore()
+    sid = _make_session(store)
+    _write_journal(sid, finished=False)
+    # 把 journal 的 mtime 拨到过去，模拟"中断后又有新 run 正常收尾"
+    old = time.time() - 3600
+    os.utime(trace_dir() / "run-i1.jsonl", (old, old))
+    store.save(store.load(sid))  # 会话文件重新落盘（mtime = 现在）
+
+    assert client.get(f"/api/sessions/{sid}/interrupted").json() == {"interrupted": False}
+    assert client.post(f"/api/sessions/{sid}/resume").status_code == 404
