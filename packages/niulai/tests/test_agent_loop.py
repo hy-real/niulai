@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 import pytest
@@ -73,6 +74,68 @@ def _emitter() -> tuple[EventEmitter, list]:
 
 def _tool_call(call_id: str = "c1", symbol: str = "600519") -> ToolCall:
     return ToolCall(id=call_id, name="stock_quote", arguments=f'{{"symbol":"{symbol}"}}')
+
+
+class _CancellingLLM:
+    """在流出若干正文后"被取消"：模拟用户点停止时正在流式回答。"""
+
+    def __init__(self, partial_text: str, first_response: LLMResponse | None = None) -> None:
+        self.partial_text = partial_text
+        self.first_response = first_response
+        self.seen_messages: list[list] = []
+
+    async def stream_chat(self, messages, tools=(), *, on_text=None):  # noqa: ANN001
+        self.seen_messages.append(list(messages))
+        if self.first_response is not None and len(self.seen_messages) == 1:
+            if on_text is not None and self.first_response.text:
+                on_text(self.first_response.text)
+            return self.first_response
+        if on_text is not None:
+            on_text(self.partial_text)
+        raise asyncio.CancelledError()
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test_取消也是收尾_半截回答进transcript():
+    """点停止时正在流式输出：transcript 要留住用户已看到的半截内容，
+    stop_reason=cancelled，且结果是正常返回而不是异常。"""
+    llm = _CancellingLLM("茅台最新价 1252.")
+    emitter, events = _emitter()
+    runtime = AgentRuntime(settings=_settings(), llm=llm, tools=ToolRegistry([]))  # type: ignore[arg-type]
+
+    result = await runtime.run("茅台多少钱", emitter=emitter)
+
+    assert result.stop_reason == "cancelled"
+    assert result.text == "茅台最新价 1252."
+    assert result.messages[-1].role == "assistant"
+    assert result.messages[-1].content == "茅台最新价 1252."
+    # 事件流有正常终态，前端不悬空
+    kinds = [event.type for event in events]
+    assert EventType.FINAL in kinds
+    assert kinds[-1] is EventType.RUN_END
+
+
+async def test_取消时已完成轮次的工具结果不丢():
+    """先查完行情、第二轮回答中途被取消：已发生的工具调用与结果都在。"""
+    llm = _CancellingLLM(
+        "现价 1252.",
+        first_response=LLMResponse(
+            tool_calls=[_tool_call()], usage=Usage(10, 5, 15), finish_reason="tool_calls"
+        ),
+    )
+    emitter, _ = _emitter()
+    runtime = AgentRuntime(settings=_settings(), llm=llm, tools=ToolRegistry([_QuoteTool()]))  # type: ignore[arg-type]
+
+    result = await runtime.run("茅台多少钱", emitter=emitter)
+
+    assert result.stop_reason == "cancelled"
+    assert _QuoteTool.calls == [{"symbol": "600519"}]  # 工具真的执行过
+    roles = [m.role for m in result.messages if m.role != "system"]
+    assert roles == ["user", "assistant", "tool", "assistant"]
+    assert result.messages[3].content.startswith("贵州茅台")
+    assert result.messages[4].content == "现价 1252."
 
 
 async def test_一轮工具调用后给出最终回答():

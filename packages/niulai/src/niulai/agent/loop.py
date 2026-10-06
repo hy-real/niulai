@@ -8,7 +8,7 @@
 
 1. 模型不再要求调用工具 → 正常结束
 2. 达到轮数上限        → 强制收敛（最后一轮不让调工具）
-3. 外部取消            → `asyncio.CancelledError` 向上传播
+3. 外部取消            → 取消也是**收尾**：返回 stop_reason=cancelled 的半成品结果
 4. 运行时熔断          → 重复 / 连续失败的调用被拦下，逼模型收敛
 
 第 4 条不自己造"取消标志位"：`asyncio` 的任务取消会逐层透传，
@@ -112,6 +112,8 @@ class AgentRuntime:
         turn = 0
         omitted_total = 0
         guard = ToolGuard(max_consecutive_failures=self._settings.max_consecutive_failures)
+        streamed: list[str] = []       # 本轮流式输出的累计 —— 取消时用它留住半截回答
+        assistant_recorded = False     # 本轮 assistant 消息是否已写入 transcript
 
         emitter.emit(
             EventType.RUN_START,
@@ -127,6 +129,8 @@ class AgentRuntime:
         try:
             for turn in range(1, self._settings.max_turns + 1):
                 force_answer = turn == self._settings.max_turns
+                streamed.clear()
+                assistant_recorded = False
 
                 # 发出去的是一份裁剪视图；transcript 本身始终完整。
                 view, context_stats = fit_context(
@@ -146,7 +150,9 @@ class AgentRuntime:
                     # 收口指令只追加在最后一轮，不污染正常轮次
                     view = view + [Message(role="user", content=FORCE_ANSWER_PROMPT)]
 
-                response = await self._call_llm(view, emitter, allow_tools=not force_answer)
+                response = await self._call_llm(
+                    view, emitter, allow_tools=not force_answer, text_sink=streamed
+                )
                 usage = usage.merged(response.usage)
                 emitter.emit(EventType.USAGE, turn=turn, cumulative=usage.to_dict())
 
@@ -155,6 +161,7 @@ class AgentRuntime:
                     # transcript 不允许以"未执行的工具调用"结尾，否则续跑时协议不合法。
                     # Anthropic 的 raw_blocks 里就含着 tool_use 块，一并丢掉才对。
                     transcript.append(Message(role="assistant", content=response.text))
+                    assistant_recorded = True
                     emitter.emit(EventType.ASSISTANT_MESSAGE, turn=turn, text=response.text)
                     final_text = response.text
                     stop_reason = "max_turns"
@@ -172,6 +179,7 @@ class AgentRuntime:
                         raw_blocks=response.raw_blocks,
                     )
                 )
+                assistant_recorded = True
                 emitter.emit(
                     EventType.ASSISTANT_MESSAGE,
                     turn=turn,
@@ -201,9 +209,27 @@ class AgentRuntime:
             )
 
         except asyncio.CancelledError:
+            # 取消也是一种**正常收尾**，不再向上抛：调用方（webapi / CLI）拿到
+            # 半成品 RunResult 才能把"用户已经看到一半的对话"落进会话。
+            # 取消的传播机制不变 —— 仍是 asyncio 任务取消逐层打断 LLM 流与工具，
+            # 只是终点从"异常退出"改成"带结果的退出"。
             stop_reason = "cancelled"
             emitter.emit(EventType.ERROR, kind="CancelledError", message="运行被取消")
-            raise
+            partial = "".join(streamed)
+            if partial and not assistant_recorded:
+                # 正在流式输出的那句话还没入 transcript：把半截留住，
+                # 否则下次打开会话它就消失了（用户亲眼看过它）。
+                transcript.append(Message(role="assistant", content=partial))
+                emitter.emit(EventType.ASSISTANT_MESSAGE, turn=turn, text=partial)
+            emitter.emit(EventType.FINAL, text=partial, stop_reason=stop_reason)
+            return RunResult(
+                text=partial,
+                turns=turn,
+                usage=usage,
+                stop_reason=stop_reason,
+                messages=transcript,
+                breaks=len(guard.breaks),
+            )
 
         finally:
             emitter.emit(
@@ -310,11 +336,14 @@ class AgentRuntime:
         emitter: EventEmitter,
         *,
         allow_tools: bool,
+        text_sink: list[str] | None = None,
     ) -> LLMResponse:
         specs = self._tools.specs() if allow_tools else []
 
         def on_text(chunk: str) -> None:
             emitter.emit(EventType.TEXT_DELTA, text=chunk)
+            if text_sink is not None:
+                text_sink.append(chunk)  # 取消时要能找回已流出的半截回答
 
         try:
             return await self._llm.stream_chat(messages, specs, on_text=on_text)

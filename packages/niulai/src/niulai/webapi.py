@@ -444,6 +444,8 @@ def create_app() -> FastAPI:
                 try:
                     result = run_task.result()
                 except asyncio.CancelledError:
+                    # 防御分支：内核现在把取消收尾成 stop_reason=cancelled 的正常
+                    # 返回值（走下方 else 分支落会话），理论上到不了这里。
                     yield _sse_frame(
                         "run_result",
                         {"run_id": run_id, "session_id": session.id, "stop_reason": "cancelled"},
