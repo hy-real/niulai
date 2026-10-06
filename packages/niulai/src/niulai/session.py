@@ -16,8 +16,16 @@
 发送要够小才烧得起 token。如果为了省 token 把存储也裁了，
 那"压缩"就变成了"不可逆的丢数据"。
 
-（P4 会把它换成 SQLite，并加上按 run 的索引与迁移逻辑。
-现在先用 JSON：一个会话一个文件，出问题时用文本编辑器就能看。）
+## 存储：SQLite 单文件
+
+P4 起会话存进 `~/.niulai/niulai.db`（SQLite：单文件、零运维、stdlib 自带）：
+
+- 每条消息一个 `payload` JSON —— **往返不丢东西**：`tool_calls` 和
+  `raw_blocks` 少一样，恢复出来的 transcript 就发不出去
+  （Anthropic 的 thinking 块缺了直接 400）；
+- 保存 = 整段重写（消息全删全插，单事务）。会话是单写者的
+  （webapi 按会话隔离并发，同一会话同时只有一个 run），
+  不需要更细的增量写。
 """
 
 from __future__ import annotations
@@ -25,15 +33,45 @@ from __future__ import annotations
 import datetime as dt
 import json
 import secrets
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .errors import NiulaiError
 from .llm.types import Message, ToolCall, Usage
-from .paths import sessions_dir
+from .paths import db_file
 
 TITLE_CHARS = 40
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sessions (
+    id                 TEXT PRIMARY KEY,
+    title              TEXT NOT NULL DEFAULT '',
+    created_at         TEXT NOT NULL DEFAULT '',
+    updated_at         TEXT NOT NULL DEFAULT '',
+    created_ms         INTEGER NOT NULL DEFAULT 0,
+    updated_ms         INTEGER NOT NULL DEFAULT 0,
+    prompt_tokens      INTEGER NOT NULL DEFAULT 0,
+    completion_tokens  INTEGER NOT NULL DEFAULT 0,
+    total_tokens       INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    runs               TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TABLE IF NOT EXISTS messages (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    ord        INTEGER NOT NULL,
+    payload    TEXT NOT NULL,
+    PRIMARY KEY (session_id, ord)
+);
+"""
+
+_SESSION_COLS = (
+    "id, title, created_at, updated_at, prompt_tokens, completion_tokens,"
+    " total_tokens, cache_read_tokens, cache_write_tokens, runs"
+)
 
 
 class SessionError(NiulaiError):
@@ -66,15 +104,20 @@ class Session:
 
 
 class SessionStore:
-    """会话的落盘与读取。"""
+    """会话的落盘与读取（SQLite 单文件）。"""
 
-    def __init__(self, directory: Path | None = None) -> None:
-        self._dir = Path(directory) if directory else sessions_dir()
+    def __init__(self, db: Path | None = None) -> None:
+        self._db = Path(db) if db else db_file()
+        self._db.parent.mkdir(parents=True, exist_ok=True)
+        with closing(self._connect()) as conn, conn:
+            conn.executescript(_SCHEMA)
 
     @property
-    def directory(self) -> Path:
-        self._dir.mkdir(parents=True, exist_ok=True)
-        return self._dir
+    def path(self) -> Path:
+        """数据库文件位置。"""
+        return self._db
+
+    # ------------------------------------------------------------- 基础操作
 
     def new_id(self) -> str:
         stamp = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -85,86 +128,73 @@ class SessionStore:
         return Session(id=self.new_id(), created_at=stamp, updated_at=stamp)
 
     def save(self, session: Session) -> Path:
-        path = self.directory / f"{session.id}.json"
-        payload = {
-            "id": session.id,
-            "title": session.title,
-            "created_at": session.created_at,
-            "updated_at": session.updated_at,
-            "usage": session.usage.to_dict(),
-            "runs": session.runs,
-            "messages": [_message_to_dict(m) for m in session.messages],
-        }
-        # 先写临时文件再替换：中途崩溃不会留下半个 JSON
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
-        return path
+        with closing(self._connect()) as conn, conn:
+            _write(conn, session)
+        return self._db
 
     def load(self, session_id: str) -> Session:
-        path = self._resolve(session_id)
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise SessionError(f"读取会话 {path.name} 失败：{exc}") from exc
+        sid = self._resolve(session_id)
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                f"SELECT {_SESSION_COLS} FROM sessions WHERE id = ?", (sid,)
+            ).fetchone()
+            if row is None:
+                raise SessionError(f"找不到会话：{session_id}（库 {self._db.name}）")
+            payloads = conn.execute(
+                "SELECT payload FROM messages WHERE session_id = ? ORDER BY ord", (sid,)
+            ).fetchall()
+        return _session_from_row(row, _messages_from_payloads(payloads))
 
-        return Session(
-            id=str(payload.get("id") or path.stem),
-            title=str(payload.get("title") or ""),
-            created_at=str(payload.get("created_at") or ""),
-            updated_at=str(payload.get("updated_at") or ""),
-            usage=_usage_from_dict(payload.get("usage") or {}),
-            runs=list(payload.get("runs") or []),
-            messages=[_message_from_dict(d) for d in payload.get("messages") or []],
-        )
+    def list_ids(self, *, limit: int = 20, offset: int = 0) -> list[Session]:
+        """按更新时间倒序列出会话（只读元信息，messages 留空以省内存）。
 
-    def list_ids(self, *, limit: int = 20) -> list[Session]:
-        """按更新时间倒序列出会话（只读元信息，messages 留空以省内存）。"""
-        paths = sorted(self.directory.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-        out: list[Session] = []
-        for path in paths[:limit]:
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            out.append(
-                Session(
-                    id=str(payload.get("id") or path.stem),
-                    title=str(payload.get("title") or ""),
-                    created_at=str(payload.get("created_at") or ""),
-                    updated_at=str(payload.get("updated_at") or ""),
-                    usage=_usage_from_dict(payload.get("usage") or {}),
-                    runs=list(payload.get("runs") or []),
-                )
-            )
-        return out
+        limit/offset 供分页：返回条数 < limit 即已翻到底。
+        """
+        limit, offset = max(0, int(limit)), max(0, int(offset))
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"SELECT {_SESSION_COLS} FROM sessions"
+                " ORDER BY updated_ms DESC, id DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        return [_session_from_row(row) for row in rows]
 
     def latest(self) -> Session | None:
         items = self.list_ids(limit=1)
         return self.load(items[0].id) if items else None
 
-    def _resolve(self, session_id: str) -> Path:
+    # ------------------------------------------------------------- 内部
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._db)
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    def _resolve(self, session_id: str) -> str:
+        """定位会话 id：精确匹配优先，其次子串（只认一个时直接采用）。
+
+        围栏：输入经 webapi 原样暴露给浏览器端，这里只返回库内已存在的 id，
+        不存在"按路径读任意文件"的可能 —— 围栏从"拒绝路径字符"收紧为
+        "只认库内主键"。
+        """
         raw = (session_id or "").strip()
         if not raw:
             raise SessionError("会话 id 不能为空")
+        with closing(self._connect()) as conn:
+            ids = [r[0] for r in conn.execute("SELECT id FROM sessions ORDER BY id")]
+
         if raw in ("latest", "last"):
             items = self.list_ids(limit=1)
             if not items:
                 raise SessionError("还没有任何会话")
-            return self.directory / f"{items[0].id}.json"
+            return items[0].id
 
-        # 围栏：只认本目录内的会话文件。raw 会经 webapi 原样暴露给浏览器端，
-        # 这里若接受"任意已存在的路径"，就是一个现成的任意文件读。
-        if ".." in raw or "/" in raw or "\\" in raw:
-            raise SessionError(f"非法的会话 id：{raw}")
+        if raw in ids:
+            return raw
 
-        exact = self.directory / f"{raw}.json"
-        if exact.is_file():
-            return exact
-
-        matches = sorted(self.directory.glob(f"*{raw}*.json"))
+        matches = sorted(i for i in ids if raw in i)
         if not matches:
-            raise SessionError(f"找不到会话：{raw}（目录 {self.directory}）")
+            raise SessionError(f"找不到会话：{raw}（库 {self._db}）")
         return matches[0]
 
 
@@ -175,8 +205,86 @@ def now_iso() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
+def _ts_ms(iso: str) -> int:
+    """ISO 时间转 epoch 毫秒（排序键）。解析不了就 0，沉底但不报错。"""
+    try:
+        return int(dt.datetime.fromisoformat(iso).timestamp() * 1000)
+    except (TypeError, ValueError, OSError):
+        return 0
+
+
+def _write(conn: sqlite3.Connection, session: Session) -> None:
+    """写一个会话：元信息 upsert + 消息整段重写（全删全插）。
+
+    必须在事务里调（`with conn:`）。单会话单写者（webapi 按会话隔离并发），
+    事务保证中途崩溃不会留下"半段 transcript"。
+    """
+    conn.execute(
+        "INSERT OR REPLACE INTO sessions"
+        " (id, title, created_at, updated_at, created_ms, updated_ms,"
+        "  prompt_tokens, completion_tokens, total_tokens,"
+        "  cache_read_tokens, cache_write_tokens, runs)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            session.id,
+            session.title,
+            session.created_at,
+            session.updated_at,
+            _ts_ms(session.created_at),
+            _ts_ms(session.updated_at),
+            session.usage.prompt_tokens,
+            session.usage.completion_tokens,
+            session.usage.total_tokens,
+            session.usage.cache_read_tokens,
+            session.usage.cache_write_tokens,
+            json.dumps(session.runs, ensure_ascii=False),
+        ),
+    )
+    conn.execute("DELETE FROM messages WHERE session_id = ?", (session.id,))
+    conn.executemany(
+        "INSERT INTO messages (session_id, ord, payload) VALUES (?,?,?)",
+        [
+            (session.id, i, json.dumps(_message_to_dict(m), ensure_ascii=False))
+            for i, m in enumerate(session.messages)
+        ],
+    )
+
+
+def _session_from_row(row: tuple, messages: list[Message] | None = None) -> Session:
+    (
+        sid, title, created_at, updated_at,
+        prompt_tokens, completion_tokens, total_tokens,
+        cache_read_tokens, cache_write_tokens, runs_json,
+    ) = row
+    return Session(
+        id=str(sid),
+        title=str(title or ""),
+        created_at=str(created_at or ""),
+        updated_at=str(updated_at or ""),
+        usage=Usage(
+            prompt_tokens=int(prompt_tokens or 0),
+            completion_tokens=int(completion_tokens or 0),
+            total_tokens=int(total_tokens or 0),
+            cache_read_tokens=int(cache_read_tokens or 0),
+            cache_write_tokens=int(cache_write_tokens or 0),
+        ),
+        runs=list(json.loads(runs_json or "[]")),
+        messages=messages if messages is not None else [],
+    )
+
+
+def _messages_from_payloads(payloads: list[tuple]) -> list[Message]:
+    out: list[Message] = []
+    for (payload,) in payloads:
+        try:
+            out.append(_message_from_dict(json.loads(payload)))
+        except json.JSONDecodeError as exc:
+            raise SessionError(f"消息数据损坏：{exc}") from exc
+    return out
+
+
 def _message_to_dict(message: Message) -> dict[str, Any]:
-    """只写有值的字段 —— 会话文件要能被人直接打开读。"""
+    """只写有值的字段。"""
     data: dict[str, Any] = {"role": message.role}
     if message.content is not None:
         data["content"] = message.content

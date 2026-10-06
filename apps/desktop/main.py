@@ -35,8 +35,9 @@ def main() -> None:
         width=1100,
         height=760,
         min_size=(860, 600),
+        text_select=True,  # 默认 False（壳层注入 user-select:none）；这是窗口参数，不是 start() 的
     )
-    webview.start(text_select=True)  # 默认 False（壳层注入 user-select:none）；阻塞主线程直到窗口关闭
+    webview.start()  # 阻塞主线程直到窗口关闭
 
 
 if __name__ == "__main__":

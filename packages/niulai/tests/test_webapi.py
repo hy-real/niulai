@@ -40,6 +40,28 @@ def test_sessions端点_空目录返回空列表(monkeypatch, tmp_path):
     assert client.get("/api/sessions").json() == []
 
 
+def test_sessions端点_按更新时间倒序分页(monkeypatch, tmp_path):
+    """limit/offset 供侧栏滚动分页：倒序、翻页不重不漏、返回不满页 = 到底。"""
+    monkeypatch.setenv("NIULAI_HOME", str(tmp_path))
+    client = _client(monkeypatch, tmp_path)
+    store = SessionStore()
+    for i in range(7):
+        s = store.create()
+        s.title = f"会话{i}"
+        s.updated_at = f"2026-01-0{i + 1}T09:00:00+08:00"
+        store.save(s)
+
+    page1 = client.get("/api/sessions", params={"limit": 3}).json()
+    page2 = client.get("/api/sessions", params={"limit": 3, "offset": 3}).json()
+    page3 = client.get("/api/sessions", params={"limit": 3, "offset": 6}).json()
+
+    assert [s["title"] for s in page1] == ["会话6", "会话5", "会话4"]
+    assert [s["title"] for s in page2] == ["会话3", "会话2", "会话1"]
+    assert [s["title"] for s in page3] == ["会话0"]      # 不满一页 = 没有更多
+    ids = [s["id"] for s in page1 + page2 + page3]
+    assert len(ids) == len(set(ids)) == 7                # 不重不漏
+
+
 def test_会话详情不存在返回404(monkeypatch, tmp_path):
     client = _client(monkeypatch, tmp_path)
     resp = client.get("/api/sessions/不存在的id")

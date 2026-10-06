@@ -249,22 +249,46 @@ function refreshInputState() {
 
 /* ---------- 会话列表与历史 ---------- */
 
-function loadSessions() {
-  fetch('/api/sessions').then(r => r.json()).then(list => {
-    sessionsEl.innerHTML = '';
-    list.forEach(s => {
-      const d = document.createElement('div');
-      d.className = 'sess' + (s.id === activeId ? ' active' : '');
-      const t = document.createElement('div'); t.className = 't'; t.textContent = s.title;
-      const m = document.createElement('div'); m.className = 'm';
-      m.textContent = (s.updated_at || '').slice(5, 16).replace('T', ' ') + ' · '
-        + (s.total_tokens || 0).toLocaleString() + ' tk';
-      d.appendChild(t); d.appendChild(m);
-      d.addEventListener('click', () => openSession(s.id));
-      sessionsEl.appendChild(d);
-    });
-  }).catch(() => {});
+const SESS_PAGE = 20;
+let sessOffset = 0, sessDone = false, sessLoading = false;
+
+function sessionRow(s) {
+  const d = document.createElement('div');
+  d.className = 'sess' + (s.id === activeId ? ' active' : '');
+  const t = document.createElement('div'); t.className = 't'; t.textContent = s.title;
+  const m = document.createElement('div'); m.className = 'm';
+  m.textContent = (s.updated_at || '').slice(5, 16).replace('T', ' ') + ' · '
+    + (s.total_tokens || 0).toLocaleString() + ' tk';
+  d.appendChild(t); d.appendChild(m);
+  d.addEventListener('click', () => openSession(s.id));
+  return d;
 }
+
+function loadSessions(reset = true) {
+  if (reset) { sessOffset = 0; sessDone = false; sessionsEl.innerHTML = ''; }
+  if (sessDone || sessLoading) return;
+  sessLoading = true;
+  let ok = false;
+  fetch(`/api/sessions?limit=${SESS_PAGE}&offset=${sessOffset}`)
+    .then(r => r.json())
+    .then(list => {
+      list.forEach(s => sessionsEl.appendChild(sessionRow(s)));
+      sessOffset += list.length;
+      if (list.length < SESS_PAGE) sessDone = true;   // 返回不满一页 = 到底了
+      ok = true;
+    })
+    .catch(() => {})
+    .finally(() => {
+      sessLoading = false;
+      // 一屏装不下 20 条才谈得上滚动触发；装得下就先续一页（仅成功后，失败不自动重试）
+      if (ok && !sessDone && sessionsEl.scrollHeight <= sessionsEl.clientHeight) loadSessions(false);
+    });
+}
+
+sessionsEl.addEventListener('scroll', () => {
+  if (sessionsEl.scrollTop + sessionsEl.clientHeight >= sessionsEl.scrollHeight - 40)
+    loadSessions(false);
+});
 
 function renderHistoryMessage(m) {
   if (m.role === 'user') { el('user', m.content); return; }

@@ -12,7 +12,7 @@
     <data_dir>/
       config.toml   用户配置（唯一需要人动手的文件；env 优先级高于它）
       traces/       每次 run 一个 JSONL（运行轨迹，可回放）
-      sessions/     会话（多轮对话历史，JSON，可直接用编辑器打开看）
+      niulai.db     会话（SQLite 单文件；将来自选 / 缓存也进这里）
       artifacts/    大结果落盘（按 run 分子目录，内容寻址命名）
       logs/         调试日志（DEBUG/INFO 级别时自动落盘）
 
@@ -52,8 +52,9 @@ def trace_dir() -> Path:
     return _sub("traces")
 
 
-def sessions_dir() -> Path:
-    return _sub("sessions")
+def db_file() -> Path:
+    """SQLite 数据库（会话；将来自选 / 缓存也进这一个文件）。"""
+    return ensure_data_dir() / "niulai.db"
 
 
 def artifacts_dir() -> Path:

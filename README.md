@@ -4,7 +4,7 @@
 
 [English](#english) · [架构设计](docs/architecture.md) · [路线图](docs/architecture.md#8-路线图)
 
-> 状态：早期开发中。内核 + 多轮会话 + 4 个工具已跑通（140 个测试全绿），
+> 状态：早期开发中。内核 + 多轮会话 + Web 界面 + 评测集已跑通（198 个测试全绿），
 > LLM 层支持 OpenAI 兼容与 Anthropic 两套协议。
 > 尚未发布到 PyPI，目前从源码安装。
 
@@ -101,7 +101,7 @@ niulai tools                       # 列出工具、数据源与各自的能力�
 ~/.niulai/
 ├─ config.toml   用户配置（唯一需要人动手的文件，可省略）
 ├─ traces/       每次运行一个 JSONL（每一步都记，可回放）
-├─ sessions/     会话（多轮对话历史，JSON，可直接用编辑器打开看）
+├─ niulai.db     会话（SQLite 单文件；将来自选 / 缓存也进这里）
 ├─ artifacts/    因体积过大而落盘的工具结果
 └─ logs/         调试日志（DEBUG/INFO 时自动出现）
 ```
@@ -152,11 +152,13 @@ $env:NIULAI_LOG_FILE="d:\tmp\niulai.log"   # 可选：不设且级别开到 INFO
 | **运行时熔断**（重复调用 / 连续失败被拦下，不靠模型自觉） | ✅ |
 | **被中断的对话可修复**（补回"结果未知"，不猜成败） | ✅ |
 | 数据源限流自动重试 | ✅ |
-| 成本统计（折算成钱，而不只是 token） | ⏳ |
-| 本地 Web 界面（三栏） | ⏳ P5 |
-| 桌面安装包（双击即用） | ⏳ P6 |
+| **会话存储 SQLite**（单文件 `niulai.db`） | ✅ |
+| Token 统计（每轮 / 累计；不做费用换算——自带 Key 无需算钱） | ✅ |
+| 数据源兜底（腾讯 / 新浪 / akshare） | ⏳ 有意延后，见路线图 |
+| 本地 Web 界面（三栏） | ✅ |
+| 桌面安装包（双击即用） | ⏳ P6（壳已就位，差打包流水线） |
 | 自选股 / 条件预警 / 盘后复盘 | ⏳ P7 |
-| 评测集（任务级断言） | ⏳ P3.5 |
+| 评测集（任务级断言，10 条确定性断言） | ✅ |
 | 独立 MCP server（给 Claude Code / Cursor 用） | ⏳ P9 |
 
 完整路线图与验收标准见 [docs/architecture.md](docs/architecture.md#8-路线图)，

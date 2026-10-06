@@ -43,7 +43,7 @@ from .errors import ConfigError
 from .events import EventEmitter, EventType, new_run_id
 from .llm import Usage
 from .paths import trace_dir
-from .session import SessionError, SessionStore
+from .session import SessionError, SessionStore, _ts_ms
 from .trace import TraceResumeError, TraceWriter, load_transcript, read_trace
 
 DEFAULT_PORT = 8710
@@ -254,7 +254,13 @@ def create_app() -> FastAPI:
         return {"sources": asm.service.source_ids, "routing": routing, "tools": out_tools}
 
     @app.get("/api/sessions")
-    def api_sessions(limit: int = 20):
+    def api_sessions(limit: int = 20, offset: int = 0):
+        """会话列表（按更新时间倒序）。
+
+        limit/offset 供前端滚动分页：一页 limit 条，翻页传 offset；
+        返回条数 < limit 即没有更多。只影响"列表视图"——
+        按 id 打开 / 恢复会话不受此窗口限制。
+        """
         return [
             {
                 "id": s.id,
@@ -263,7 +269,7 @@ def create_app() -> FastAPI:
                 "turns": s.turns,
                 "total_tokens": s.usage.total_tokens,
             }
-            for s in store.list_ids(limit=limit)
+            for s in store.list_ids(limit=limit, offset=offset)
         ]
 
     @app.get("/api/sessions/{session_id}")
@@ -289,8 +295,9 @@ def create_app() -> FastAPI:
         if found is None:
             return None
         path, head = found
-        session_file = store.directory / f"{session.id}.json"
-        if session_file.exists() and path.stat().st_mtime < session_file.stat().st_mtime:
+        # 现场比会话最后一次落盘旧 → 过期残留（会话的 updated_at 即最后活动时间）
+        saved_sec = _ts_ms(session.updated_at) / 1000
+        if saved_sec and path.stat().st_mtime < saved_sec:
             return None
         return path, head
 
