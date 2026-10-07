@@ -142,7 +142,10 @@ def test_提问次数只数用户消息(tmp_path):
         Message(role="user", content="二"),
         Message(role="assistant", content="答2"),
     ]
-    assert session.turns == 2  # 不是 6 条消息，也不是 2 个 ReAct 轮
+    session.note_run("run1", Usage())          # turns 在 note_run / save 时从 messages 重算
+    assert session.turns == 2                  # 不是 6 条消息，也不是 2 个 ReAct 轮
+    store.save(session)
+    assert store.load(session.id).turns == 2   # 落库为字段：列表视图不加载 messages 也能读
 
 
 def test_取最近一条按更新时间(tmp_path):

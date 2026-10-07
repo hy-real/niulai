@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_at         TEXT NOT NULL DEFAULT '',
     created_ms         INTEGER NOT NULL DEFAULT 0,
     updated_ms         INTEGER NOT NULL DEFAULT 0,
+    turns              INTEGER NOT NULL DEFAULT 0,
     prompt_tokens      INTEGER NOT NULL DEFAULT 0,
     completion_tokens  INTEGER NOT NULL DEFAULT 0,
     total_tokens       INTEGER NOT NULL DEFAULT 0,
@@ -69,7 +70,7 @@ CREATE TABLE IF NOT EXISTS messages (
 """
 
 _SESSION_COLS = (
-    "id, title, created_at, updated_at, prompt_tokens, completion_tokens,"
+    "id, title, created_at, updated_at, turns, prompt_tokens, completion_tokens,"
     " total_tokens, cache_read_tokens, cache_write_tokens, runs"
 )
 
@@ -89,11 +90,9 @@ class Session:
     usage: Usage = field(default_factory=Usage)
     runs: list[str] = field(default_factory=list)
     title: str = ""
-
-    @property
-    def turns(self) -> int:
-        """用户提问了几次（不是 ReAct 轮数）。"""
-        return sum(1 for m in self.messages if m.role == "user")
+    # 用户提问了几次（不是 ReAct 轮数）。落库字段：列表视图不加载 messages 也要能读；
+    # note_run / _write 时从 messages 重算，是"数出来的"，不是手动维护的计数器
+    turns: int = 0
 
     def note_run(self, run_id: str, usage: Usage) -> None:
         self.runs.append(run_id)
@@ -101,6 +100,7 @@ class Session:
         self.updated_at = now_iso()
         if not self.title:
             self.title = _derive_title(self.messages)
+        self.turns = sum(1 for m in self.messages if m.role == "user")
 
 
 class SessionStore:
@@ -219,12 +219,14 @@ def _write(conn: sqlite3.Connection, session: Session) -> None:
     必须在事务里调（`with conn:`）。单会话单写者（webapi 按会话隔离并发），
     事务保证中途崩溃不会留下"半段 transcript"。
     """
+    # turns 以保存时的消息为准重算 —— 任何保存路径都不可能存进过期的计数
+    session.turns = sum(1 for m in session.messages if m.role == "user")
     conn.execute(
         "INSERT OR REPLACE INTO sessions"
-        " (id, title, created_at, updated_at, created_ms, updated_ms,"
+        " (id, title, created_at, updated_at, created_ms, updated_ms, turns,"
         "  prompt_tokens, completion_tokens, total_tokens,"
         "  cache_read_tokens, cache_write_tokens, runs)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             session.id,
             session.title,
@@ -232,6 +234,7 @@ def _write(conn: sqlite3.Connection, session: Session) -> None:
             session.updated_at,
             _ts_ms(session.created_at),
             _ts_ms(session.updated_at),
+            session.turns,
             session.usage.prompt_tokens,
             session.usage.completion_tokens,
             session.usage.total_tokens,
@@ -252,7 +255,7 @@ def _write(conn: sqlite3.Connection, session: Session) -> None:
 
 def _session_from_row(row: tuple, messages: list[Message] | None = None) -> Session:
     (
-        sid, title, created_at, updated_at,
+        sid, title, created_at, updated_at, turns,
         prompt_tokens, completion_tokens, total_tokens,
         cache_read_tokens, cache_write_tokens, runs_json,
     ) = row
@@ -261,6 +264,7 @@ def _session_from_row(row: tuple, messages: list[Message] | None = None) -> Sess
         title=str(title or ""),
         created_at=str(created_at or ""),
         updated_at=str(updated_at or ""),
+        turns=int(turns or 0),
         usage=Usage(
             prompt_tokens=int(prompt_tokens or 0),
             completion_tokens=int(completion_tokens or 0),

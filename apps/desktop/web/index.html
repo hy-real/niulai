@@ -278,7 +278,7 @@ function sessionRow(s) {
   const t = document.createElement('div'); t.className = 't'; t.textContent = s.title;
   const m = document.createElement('div'); m.className = 'm';
   m.textContent = (s.updated_at || '').slice(5, 16).replace('T', ' ') + ' · '
-    + (s.total_tokens || 0).toLocaleString() + ' tk';
+    + (s.turns || 0) + ' 问 · ' + (s.total_tokens || 0).toLocaleString() + ' tk';
   d.appendChild(t); d.appendChild(m);
   d.addEventListener('click', () => openSession(s.id));
   return d;

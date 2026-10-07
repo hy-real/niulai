@@ -112,6 +112,7 @@ config.toml 示例（只写想改的，其余用默认值）：
 [llm]
 # protocol = "openai"          # openai（DeepSeek/通义/Kimi）或 anthropic（Claude）
 # base_url = "https://api.deepseek.com/v1"
+# api_key = "sk-..."           # 也可用环境变量 NIULAI_API_KEY（优先）
 model = "deepseek-chat"
 max_turns = 12                  # 单次提问最多几轮工具循环
 
@@ -120,7 +121,8 @@ max_turns = 12                  # 单次提问最多几轮工具循环
 ```
 
 优先级：**CLI 参数 > 环境变量 > config.toml > 默认值**（与 git / aws cli 同惯例）。
-API Key 不进配置文件——机密不落盘，用环境变量，将来接系统凭据管理器。
+API Key 可以写进 config.toml（本地单机：文件就在你自己的机器上，不出本机，
+界面与日志里只脱敏展示尾号）；环境变量优先于文件——共享环境建议只用环境变量。
 
 ### 调试日志
 
