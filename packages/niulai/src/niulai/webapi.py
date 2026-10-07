@@ -249,7 +249,9 @@ def create_app() -> FastAPI:
             )
         # cap 显式标注为 Capability：写错能力名（如 "k_lines"）会在类型检查阶段报错，
         # 而不是静默返回空列表让前端对着一张空的 routing 表猜原因。
-        caps: tuple[Capability, ...] = ("quote", "kline", "financial")
+        caps: tuple[Capability, ...] = (
+            "quote", "kline", "financial", "sector", "sector_stocks", "moneyflow",
+        )
         routing = {cap: [s.id for s in asm.service.sources_for(cap)] for cap in caps}
         return {"sources": asm.service.source_ids, "routing": routing, "tools": out_tools}
 

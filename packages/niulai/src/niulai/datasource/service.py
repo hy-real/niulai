@@ -18,9 +18,14 @@ from .base import (
     FinancialSummary,
     KlineSeries,
     MarketDataSource,
+    MoneyflowSeries,
     Quote,
+    SectorBoard,
+    SectorStockList,
 )
 from .eastmoney import EastmoneyDataSource
+from .sina import SinaDataSource
+from .tencent import TencentDataSource
 
 T = TypeVar("T")
 
@@ -64,6 +69,30 @@ class MarketDataService:
         """定期报告主要财务指标：营收 / 归母净利 / ROE / 毛利率等，最近 periods 期。"""
         return await self._route("financial", "financial", symbol, periods=periods)
 
+    async def sectors(
+        self,
+        *,
+        kind: str = "concept",
+        sort: str = "change_pct",
+        limit: int = 10,
+    ) -> SectorBoard:
+        """板块榜单：concept / industry，按 change_pct 或 moneyflow 排序，前 limit 个。"""
+        return await self._route("sector", "sectors", kind=kind, sort=sort, limit=limit)
+
+    async def moneyflow(self, symbol: str, *, days: int = 5) -> MoneyflowSeries:
+        """个股资金流：主力 / 超大单 / 大单 / 中单 / 小单，最近 days 个交易日。"""
+        return await self._route("moneyflow", "moneyflow", symbol, days=days)
+
+    async def sector_stocks(
+        self,
+        symbol: str,
+        *,
+        sort: str = "change_pct",
+        limit: int = 10,
+    ) -> SectorStockList:
+        """板块成分股：板块内逐股行情 + 估值，`symbol` 是板块代码或名称。"""
+        return await self._route("sector_stocks", "sector_stocks", symbol, sort=sort, limit=limit)
+
     async def aclose(self) -> None:
         for source in self._sources:
             close = getattr(source, "aclose", None)
@@ -98,8 +127,14 @@ class MarketDataService:
 
 
 def build_default_service() -> MarketDataService:
-    """P0/P3 只有东财一个源。
+    """东财主源（覆盖最全 + 唯一的名称搜索），腾讯 / 新浪兜底。
 
-    P3 后半会补上腾讯 / 新浪做轻量心跳兜底，akshare 作为可选长尾 adapter。
+    路由顺序即兜底顺序：
+    - quote / kline：东财 → 腾讯 → 新浪；
+    - sector / moneyflow：东财 → 新浪（腾讯没有这两个能力）；
+    - financial：只有东财。
+
+    中文名称腾讯 / 新浪解析不了 —— 它们收到名称会显式抛错，错误被路由层
+    记进失败原因里，不影响「试下一个源」的链条。
     """
-    return MarketDataService([EastmoneyDataSource()])
+    return MarketDataService([EastmoneyDataSource(), TencentDataSource(), SinaDataSource()])

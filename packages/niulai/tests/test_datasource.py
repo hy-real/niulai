@@ -16,7 +16,9 @@ from niulai.datasource.eastmoney import (
     _to_secucode,
     parse_financial,
     parse_kline,
+    parse_moneyflow,
     parse_quote,
+    parse_sectors,
 )
 from niulai.errors import DataSourceError
 
@@ -334,5 +336,84 @@ async def test_k线请求失败会给可读报错():
     with pytest.raises(DataSourceError) as exc:
         await source.kline("600519", limit=10)
     assert "K 线" in str(exc.value)
+
+
+# ---------------------------------------------------------------------- 板块 / 资金流
+
+# 实测抓取的板块行（字段代号映射见 SECTOR_FIELD_NAMES）
+SECTOR_ROWS = [
+    {
+        "f3": 6.06,
+        "f12": "BK1296",
+        "f14": "视频媒体",
+        "f62": 261217114.0,
+        "f104": 1,
+        "f105": 0,
+        "f128": "芒果超媒",
+        "f136": 6.06,
+        "f140": "300413",
+    },
+    {
+        "f3": 5.23,
+        "f12": "BK1500",
+        "f14": "医美耗材",
+        "f62": 72505887.0,
+        "f104": 3,
+        "f105": 0,
+        "f128": "锦波生物",
+        "f136": 10.28,
+        "f140": "920982",
+    },
+]
+
+
+def test_板块字段映射():
+    board = parse_sectors(SECTOR_ROWS, kind="concept", sort="change_pct")
+    assert board.source == "eastmoney"
+    assert len(board.rows) == 2
+
+    row = board.rows[0]
+    assert row.name == "视频媒体"
+    assert row.code == "BK1296"
+    assert row.change_pct == pytest.approx(6.06)
+    assert row.main_net == pytest.approx(261217114.0)
+    assert row.stock_up == 1
+    assert row.stock_down == 0
+    assert row.leader_name == "芒果超媒"
+    assert row.leader_change_pct == pytest.approx(6.06)
+
+
+def test_板块渲染带领涨股与净流入():
+    text = parse_sectors(SECTOR_ROWS, kind="concept", sort="change_pct").render()
+    assert "视频媒体" in text
+    assert "芒果超媒" in text
+    assert "2.61" in text  # 主力净流入 2.61 亿
+
+
+def test_资金流主力等于大单加超大单():
+    """东财口径：主力 = 超大单 + 大单。顺序错位不会报错只会让数字错 —— 靠自洽锁住。"""
+    data = {
+        "code": "600519",
+        "name": "贵州茅台",
+        "klines": [
+            "2026-09-30,533565520.0,-539065.0,-533026464.0,121427904.0,412137616.0,1258.62,1.86",
+        ],
+    }
+    day = parse_moneyflow(data, fallback_symbol="600519").days[0]
+    assert day.main_net == pytest.approx(day.big_net + day.super_net)
+    assert day.close == pytest.approx(1258.62)
+    assert day.change_pct == pytest.approx(1.86)
+
+
+def test_资金流渲染带口径说明():
+    data = {
+        "code": "600519",
+        "name": "贵州茅台",
+        "klines": ["2026-09-30,533565520.0,-539065.0,-533026464.0,121427904.0,412137616.0,1258.62,1.86"],
+    }
+    text = parse_moneyflow(data, fallback_symbol="600519").render()
+    assert "贵州茅台" in text
+    assert "主力 = 超大单 + 大单" in text  # 口径不写明，模型会把主力和小单加在一起
+    assert "5.34 亿" in text
 
 

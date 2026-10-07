@@ -1,8 +1,8 @@
 """数据源层。
 
-对外的名字：`MarketDataService`（工具只用它）和三种返回类型
-（`Quote` / `KlineSeries` / `FinancialSummary`）。
-具体数据源（东财 / 腾讯 / akshare）都藏在里面。
+对外的名字：`MarketDataService`（工具只用它）和各返回类型
+（`Quote` / `KlineSeries` / `FinancialSummary` / `SectorBoard` / `MoneyflowSeries`）。
+具体数据源（东财 / 腾讯 / 新浪）都藏在里面。
 """
 
 from .base import (
@@ -14,10 +14,18 @@ from .base import (
     KlineBar,
     KlineSeries,
     MarketDataSource,
+    MoneyflowDay,
+    MoneyflowSeries,
     Quote,
+    SectorBoard,
+    SectorRow,
+    SectorStockList,
+    SectorStockRow,
 )
 from .eastmoney import EastmoneyDataSource
 from .service import MarketDataService, build_default_service
+from .sina import SinaDataSource
+from .tencent import TencentDataSource
 
 __all__ = [
     "ADJUST_LABEL",
@@ -30,6 +38,14 @@ __all__ = [
     "KlineSeries",
     "MarketDataService",
     "MarketDataSource",
+    "MoneyflowDay",
+    "MoneyflowSeries",
     "Quote",
+    "SectorBoard",
+    "SectorRow",
+    "SectorStockList",
+    "SectorStockRow",
+    "SinaDataSource",
+    "TencentDataSource",
     "build_default_service",
 ]

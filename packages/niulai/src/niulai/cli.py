@@ -39,7 +39,7 @@ from .llm import Usage, build_client
 from .logs import setup_logging
 from .session import Session, SessionStore
 from .trace import TraceResumeError, TraceWriter, load_transcript, read_trace, resolve_run
-from .tools import ReadFileTool, ToolRegistry, build_stock_tools
+from .tools import ReadFileTool, ToolRegistry, build_market_tools
 
 STOP_REASON_LABEL = {
     "done": "正常结束",
@@ -191,7 +191,7 @@ def _assemble(settings: Settings) -> Assembly:
     store = ArtifactStore()
     service = build_default_service()
     tools = ToolRegistry(
-        [*build_stock_tools(service), ReadFileTool(store)],
+        [*build_market_tools(service), ReadFileTool(store)],
         artifact_store=store,
     )
     llm = build_client(settings)
@@ -584,10 +584,10 @@ def _indent(text: str, prefix: str) -> str:
 def _cmd_tools() -> int:
     store = ArtifactStore()
     service = build_default_service()
-    tools = ToolRegistry([*build_stock_tools(service), ReadFileTool(store)], artifact_store=store)
+    tools = ToolRegistry([*build_market_tools(service), ReadFileTool(store)], artifact_store=store)
 
     print(f"数据源：{'、'.join(service.source_ids)}")
-    for capability in ("quote", "kline", "financial"):
+    for capability in ("quote", "kline", "financial", "sector", "sector_stocks", "moneyflow"):
         sources = [s.id for s in service.sources_for(capability)]  # type: ignore[arg-type]
         print(f"  · {capability:<10} {'、'.join(sources) or '（无）'}")
 

@@ -29,10 +29,19 @@ def test_tools端点列出数据源与工具(monkeypatch, tmp_path):
     resp = client.get("/api/tools")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["sources"] == ["eastmoney"]
-    assert data["routing"]["quote"] == ["eastmoney"]
+    assert data["sources"] == ["eastmoney", "tencent", "sina"]
+    assert data["routing"]["quote"] == ["eastmoney", "tencent", "sina"]
+    assert data["routing"]["moneyflow"] == ["eastmoney", "sina"]
     names = {t["name"] for t in data["tools"]}
-    assert {"stock_quote", "stock_kline", "stock_financial", "read_file"} <= names
+    assert {
+        "stock_quote",
+        "stock_kline",
+        "stock_financial",
+        "market_sectors",
+        "sector_stocks",
+        "stock_moneyflow",
+        "read_file",
+    } <= names
 
 
 def test_sessions端点_空目录返回空列表(monkeypatch, tmp_path):
