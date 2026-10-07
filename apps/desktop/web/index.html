@@ -5,145 +5,173 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Niulai — 本地 A 股助手</title>
 <style>
-  :root { --bg:#f7f8fa; --panel:#ffffff; --panel2:#eef1f5; --border:#e4e8ef; --border2:#d3dae3;
-          --text:#232b38; --muted:#8a94a6; --dim:#c2cad6;
-          --accent:#d64550; --up:#e0344a; --down:#2e9e63;
-          --green:#2e9e63; --red:#e0344a; --yellow:#c98a1b;
-          --mono:"JetBrains Mono","Cascadia Code",Consolas,Menlo,monospace;
-          --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  /* ---------- 主题令牌：亮色为默认，[data-theme="dark"] 整套覆盖 ---------- */
+  :root {
+    --bg:#f6f6f8; --panel:#ffffff; --panel2:#eeeef1; --border:#e7e7ec; --border2:#d8d8df;
+    --text:#1c1c21; --muted:#8b8b95; --dim:#c6c6ce;
+    --accent:#d64550; --accent-hover:#c23a45; --accent-soft:rgba(214,69,80,.09);
+    --up:#e0344a; --down:#1f9d61; --yellow:#c98a1b; --green:#1f9d61; --red:#e0344a;
+    --warn-bg:#faf3e2; --warn-border:#ead9b0; --warn-text:#7a6420;
+    --user-bubble:#ececf0;
+    --shadow-sm:0 1px 2px rgba(22,22,28,.05);
+    --shadow-md:0 10px 34px rgba(22,22,28,.09);
+    --shadow-lg:0 18px 52px rgba(22,22,28,.18);
+    --mono:"JetBrains Mono","Cascadia Code",Consolas,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  [data-theme="dark"] {
+    --bg:#18181c; --panel:#222227; --panel2:#2c2c33; --border:#323238; --border2:#414149;
+    --text:#ececf1; --muted:#9b9ba4; --dim:#5b5b64;
+    --accent:#e5484d; --accent-hover:#f26065; --accent-soft:rgba(229,72,77,.16);
+    --up:#ff6b70; --down:#3fd68f; --yellow:#e2a336; --green:#3fd68f; --red:#ff6b70;
+    --warn-bg:#2b2617; --warn-border:#4b4022; --warn-text:#d9b45c;
+    --user-bubble:#2c2c33;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.35);
+    --shadow-md:0 10px 34px rgba(0,0,0,.4);
+    --shadow-lg:0 18px 52px rgba(0,0,0,.55);
+  }
   * { box-sizing:border-box; margin:0; }
   ::selection { background:var(--accent); color:#fff; }
-  ::-webkit-scrollbar { width:8px; height:8px; }
+  ::-webkit-scrollbar { width:7px; height:7px; }
   ::-webkit-scrollbar-thumb { background:var(--border2); border-radius:4px; }
   ::-webkit-scrollbar-thumb:hover { background:var(--muted); }
   body { background:var(--bg); color:var(--text); height:100vh; display:flex;
          font:14px/1.7 var(--sans); }
+  body.dragging { user-select:none; cursor:col-resize; }
 
   /* ---------- 侧栏 ---------- */
-  #sidebar { width:250px; background:var(--panel); border-right:1px solid var(--border);
-             display:flex; flex-direction:column; padding:14px 10px; gap:10px; }
-  .brand { font-size:14px; font-weight:700; padding:2px 8px; letter-spacing:1px; }
+  #sidebar { width:260px; flex:none; background:var(--panel); border-right:1px solid var(--border);
+             display:flex; flex-direction:column; padding:12px 10px; gap:10px; min-width:0; }
+  .brand { font-size:14px; font-weight:700; padding:4px 10px; letter-spacing:.5px; }
   .brand span { background:linear-gradient(90deg,var(--up),#ff8a5c);
                 -webkit-background-clip:text; background-clip:text; color:transparent; }
-  .sidebtn { display:flex; gap:6px; }
+  .sidebtn { display:flex; gap:8px; }
   .sidebtn button { flex:1; background:var(--panel); color:var(--text); border:1px solid var(--border);
-                    border-radius:6px; padding:7px 8px; cursor:pointer; font:12.5px var(--sans); }
-  .sidebtn button:hover { border-color:var(--accent); color:var(--accent); }
-  #sessions { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:2px; }
-  .sess { padding:7px 10px; cursor:pointer; border-left:2px solid transparent; border-radius:4px; }
+                    border-radius:10px; padding:8px 10px; cursor:pointer; font:13px var(--sans);
+                    transition:background .15s, border-color .15s; }
+  .sidebtn button:hover { background:var(--panel2); border-color:var(--border2); }
+  #sessions { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:2px; padding:2px; }
+  .sess { padding:8px 10px; cursor:pointer; border-radius:9px; }
   .sess:hover { background:var(--panel2); }
-  .sess.active { background:var(--panel2); border-left-color:var(--accent); }
+  .sess.active { background:var(--panel2); }
+  .sess.active .t { font-weight:600; }
   .sess .t { font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .sess .m { font-size:11px; color:var(--muted); font-family:var(--mono); }
-  .sidefoot { font-size:11px; color:var(--dim); padding:0 8px; }
+  .sess .m { font-size:11px; color:var(--muted); }
+  .sidefoot { font-size:11px; color:var(--dim); padding:0 10px; }
 
-  /* ---------- 顶栏：行情软件式信息条 ---------- */
-  #topbar { display:flex; justify-content:space-between; align-items:center; padding:10px 20px;
+  /* ---------- 侧栏拖宽把手 ---------- */
+  #sash { flex:none; width:5px; margin:0 -2px; cursor:col-resize; z-index:5; border-radius:3px; }
+  #sash:hover, #sash.dragging { background:var(--accent); opacity:.45; }
+
+  /* ---------- 顶栏 ---------- */
+  #topbar { display:flex; justify-content:space-between; align-items:center; padding:12px 20px;
             border-bottom:1px solid var(--border); background:var(--panel); }
-  .ttitle { display:flex; align-items:center; font-weight:600; font-size:13.5px; }
+  .ttitle { display:flex; align-items:center; gap:9px; font-weight:600; font-size:13.5px; }
   .dot { width:7px; height:7px; border-radius:50%; background:var(--down); display:inline-block;
-         margin-right:9px; animation:pulse 2.4s ease-in-out infinite; }
-  @keyframes pulse { 0%,100% { opacity:1; box-shadow:0 0 0 0 rgba(46,158,99,.4); }
-                     50% { opacity:.45; box-shadow:0 0 0 5px rgba(46,158,99,0); } }
-  .tinfo { font-size:11.5px; color:var(--muted); font-family:var(--mono); }
+         animation:pulse 2.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity:1; box-shadow:0 0 0 0 rgba(63,214,143,.4); }
+                     50% { opacity:.45; box-shadow:0 0 0 5px rgba(63,214,143,0); } }
+  .tinfo { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:10px; }
+  #themeBtn { background:transparent; border:0; border-radius:8px; width:30px; height:30px;
+              font-size:15px; line-height:1; cursor:pointer; color:var(--muted);
+              display:flex; align-items:center; justify-content:center; }
+  #themeBtn:hover { background:var(--panel2); color:var(--text); }
 
   /* ---------- 恢复提示条 ---------- */
   #resumebar { display:none; align-items:center; justify-content:space-between; gap:10px;
-               padding:8px 20px; background:#fdf6e9; border-bottom:1px solid #e8d9b0;
-               font-size:12.5px; color:#7a6420; }
+               padding:8px 20px; background:var(--warn-bg); border-bottom:1px solid var(--warn-border);
+               font-size:12.5px; color:var(--warn-text); }
   #resumebar.show { display:flex; }
   #resumebar .task { font-weight:600; }
   #resumebar button { background:var(--panel); border:1px solid var(--border2); color:var(--text);
-                      border-radius:6px; padding:4px 12px; font:12px var(--sans); cursor:pointer; }
+                      border-radius:8px; padding:4px 12px; font:12px var(--sans); cursor:pointer; }
   #resumebar #resumeBtn { border-color:var(--yellow); color:var(--yellow); font-weight:600; }
   #resumebar #resumeBtn:hover { background:var(--yellow); color:#fff; }
 
   /* ---------- 聊天区 ---------- */
-  #main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #main { flex:1; display:flex; flex-direction:column; min-width:0; position:relative; }
   #chatwrap { flex:1; position:relative; display:flex; min-height:0; }
-  #chat { flex:1; overflow-y:auto; padding:20px 26px; display:flex; flex-direction:column; gap:15px; }
-  .user, .assistant { max-width:78%; white-space:pre-wrap; padding:9px 14px;
-                      border-radius:12px; overflow-wrap:anywhere; }
-  .user { align-self:flex-end; background:var(--accent); color:#fff;
-          border-bottom-right-radius:3px; }
-  .user::before { content:"YOU"; display:block; font-size:10.5px; letter-spacing:1.5px;
-                  color:rgba(255,255,255,.72); margin-bottom:1px; font-family:var(--mono); }
-  .assistant { align-self:flex-start; background:var(--panel); border:1px solid var(--border);
-               border-bottom-left-radius:3px; box-shadow:0 1px 2px rgba(31,43,56,.05); }
-  .assistant::before { content:"● NIULAI"; display:block; font-size:10.5px; letter-spacing:1.5px;
-                       color:var(--accent); margin-bottom:1px; font-family:var(--mono); }
+  /* 内容限宽居中：窄窗口自动退化为左右 26px 边距 */
+  #chat { flex:1; overflow-y:auto; padding:24px max(26px, calc((100% - 880px) / 2));
+          display:flex; flex-direction:column; gap:14px; }
+  .user, .assistant { max-width:82%; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.75; }
+  /* Codex 式：用户右侧浅灰气泡，AI 平铺无气泡 */
+  .user { align-self:flex-end; background:var(--user-bubble); color:var(--text);
+          padding:10px 15px; border-radius:16px 16px 5px 16px; box-shadow:var(--shadow-sm); }
+  .assistant { align-self:flex-start; padding:2px 2px; }
   .line { color:var(--muted); font-size:12px; align-self:center; text-align:center; }
-  .tool { align-self:flex-start; margin-left:6px; background:var(--panel); border:1px solid var(--border);
-          border-radius:6px; padding:8px 12px; font-size:12.5px; max-width:86%;
-          box-shadow:0 1px 2px rgba(31,43,56,.05); }
-  .tool .head { color:var(--accent); font-family:var(--mono); }
-  .tool .prev { color:var(--muted); margin-top:5px; padding-top:5px; border-top:1px dashed var(--border);
+  .tool { align-self:flex-start; background:var(--panel); border:1px solid var(--border);
+          border-radius:10px; padding:9px 12px; font-size:12.5px; max-width:86%;
+          box-shadow:var(--shadow-sm); }
+  .tool .head { color:var(--accent); font-family:var(--mono); font-size:12px; }
+  .tool .prev { color:var(--muted); margin-top:6px; padding-top:6px; border-top:1px dashed var(--border);
                 white-space:pre-wrap; word-break:break-all; font-family:var(--mono); font-size:11.5px; }
   .ok { color:var(--down); } .err { color:var(--up); } .warn { color:var(--yellow); }
 
-  /* ---------- 空状态：K 线 ASCII + 快捷提问 ---------- */
+  /* ---------- 空状态（首页） ---------- */
   #empty { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
-           justify-content:center; gap:12px; pointer-events:none; }
-  #empty .candles { font-family:var(--mono); font-size:26px; letter-spacing:4px;
+           justify-content:center; gap:10px; pointer-events:none; }
+  #empty .candles { font-family:var(--mono); font-size:30px; letter-spacing:5px;
     background:linear-gradient(90deg,var(--up),#ff8a5c,var(--down));
     -webkit-background-clip:text; background-clip:text; color:transparent; }
-  #empty .etitle { color:var(--muted); font-size:13.5px; }
-  .chips { display:flex; gap:8px; margin-top:4px; pointer-events:auto; flex-wrap:wrap;
+  #empty .etitle { color:var(--text); font-size:17px; font-weight:600; }
+  .chips { display:flex; gap:8px; margin-top:6px; pointer-events:auto; flex-wrap:wrap;
            justify-content:center; }
   .chip { background:var(--panel); border:1px solid var(--border); color:var(--muted);
-          border-radius:999px; padding:6px 15px; font:12.5px var(--sans); cursor:pointer; }
-  .chip:hover { border-color:var(--accent); color:var(--accent); }
+          border-radius:999px; padding:7px 16px; font:13px var(--sans); cursor:pointer;
+          box-shadow:var(--shadow-sm); transition:color .15s, border-color .15s, background .15s; }
+  .chip:hover { color:var(--text); border-color:var(--border2); background:var(--panel2); }
 
   /* ---------- 输入区 ---------- */
-  #composer { display:flex; gap:8px; padding:13px 20px; border-top:1px solid var(--border);
-              background:var(--panel); align-items:stretch; }
-  #promptline { flex:1; display:flex; align-items:flex-start; gap:9px; background:var(--panel);
-                border:1px solid var(--border2); border-radius:8px; padding:10px 13px; }
-  #promptline::before { content:"❯"; color:var(--accent); font-family:var(--mono); font-weight:600; }
-  #promptline:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px rgba(214,69,80,.10); }
+  #composer { display:flex; gap:10px; padding:14px 20px; border-top:1px solid var(--border);
+              background:var(--panel); align-items:stretch; width:100%; max-width:920px;
+              margin:0 auto; }
+  #promptline { flex:1; display:flex; align-items:flex-start; background:var(--panel);
+                border:1px solid var(--border2); border-radius:14px; padding:11px 15px;
+                transition:border-color .15s, box-shadow .15s; }
+  #promptline:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
   #input { flex:1; border:0; background:transparent; color:var(--text); resize:none;
-           font:14px/1.6 var(--sans); outline:none; height:44px; padding:0; }
+           font:14.5px/1.6 var(--sans); outline:none; height:44px; padding:0; }
   #input::placeholder { color:var(--dim); }
-  #send { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:0 20px;
-          font:13px var(--sans); cursor:pointer; }
-  #send:hover:not(:disabled) { background:#c23a45; }
+  #send { background:var(--accent); color:#fff; border:0; border-radius:12px; padding:0 22px;
+          font:13.5px var(--sans); cursor:pointer; transition:background .15s; }
+  #send:hover:not(:disabled) { background:var(--accent-hover); }
   #send:disabled { opacity:.4; cursor:default; }
   #stop { display:none; background:var(--panel); color:var(--muted); border:1px solid var(--border2);
-          border-radius:8px; padding:0 18px; font:13px var(--sans); cursor:pointer; }
+          border-radius:12px; padding:0 18px; font:13.5px var(--sans); cursor:pointer; }
   #stop:hover { border-color:var(--up); color:var(--up); }
 
   /* ---------- 首页模式：新会话时，输入框随空状态一起垂直居中 ---------- */
   /* JS 会把 #composer 移入 #empty（纯 CSS 拿不到"DOM 挪位置"），离开首页移回 #main 末尾 */
-  #empty #composer { pointer-events:auto; margin-top:16px; width:min(680px, 92%);
+  #empty #composer { pointer-events:auto; margin-top:18px; width:min(640px, 92%);
                      border-top:0; background:transparent; padding:0; align-items:stretch; }
-  #empty #promptline { border-radius:14px; box-shadow:0 10px 34px rgba(31,43,56,.10); }
-  #empty #input { height:50px; }
+  #empty #promptline { border-radius:16px; box-shadow:var(--shadow-md); }
+  #empty #input { height:52px; font-size:15px; }
   #empty #send { padding:0 24px; }
 
   /* ---------- 设置弹窗 ---------- */
-  #overlay { position:fixed; inset:0; background:rgba(35,43,56,.35); display:none;
+  #overlay { position:fixed; inset:0; background:rgba(15,15,20,.45); display:none;
              align-items:center; justify-content:center; z-index:10; }
   #overlay.show { display:flex; }
-  #settings { width:460px; background:var(--panel); border:1px solid var(--border); border-radius:12px;
-              padding:20px 22px; max-height:88vh; overflow-y:auto;
-              box-shadow:0 12px 40px rgba(31,43,56,.18); }
-  #settings h2 { font-size:14px; font-weight:700; color:var(--accent); margin-bottom:4px; }
+  #settings { width:460px; background:var(--panel); border:1px solid var(--border); border-radius:16px;
+              padding:22px 24px; max-height:88vh; overflow-y:auto; box-shadow:var(--shadow-lg); }
+  #settings h2 { font-size:15px; font-weight:700; margin-bottom:4px; }
   #settings .hint { color:var(--muted); font-size:11.5px; margin-bottom:14px; padding-bottom:10px;
                     border-bottom:1px solid var(--border); }
   .field { margin-bottom:10px; }
   .field label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
   .field input, .field select { width:100%; background:var(--panel); color:var(--text);
-      border:1px solid var(--border2); border-radius:6px; padding:7px 10px;
-      font:12.5px var(--mono); outline:none; }
+      border:1px solid var(--border2); border-radius:8px; padding:8px 10px;
+      font:13px var(--sans); outline:none; transition:border-color .15s, box-shadow .15s; }
   .field input:focus, .field select:focus { border-color:var(--accent);
-      box-shadow:0 0 0 3px rgba(214,69,80,.10); }
+      box-shadow:0 0 0 3px var(--accent-soft); }
   .row2 { display:flex; gap:10px; } .row2 .field { flex:1; }
   .actions { display:flex; justify-content:flex-end; gap:10px; margin-top:14px; }
-  .actions button { padding:7px 18px; border-radius:6px; font:13px var(--sans); cursor:pointer; }
+  .actions button { padding:8px 18px; border-radius:10px; font:13px var(--sans); cursor:pointer; }
   #cancelCfg { background:var(--panel); border:1px solid var(--border2); color:var(--text); }
-  #cancelCfg:hover { border-color:var(--muted); }
+  #cancelCfg:hover { background:var(--panel2); }
   #saveCfg { background:var(--accent); color:#fff; border:0; }
-  #saveCfg:hover { background:#c23a45; }
+  #saveCfg:hover { background:var(--accent-hover); }
   #saveNote { color:var(--green); font-size:12.5px; margin-top:8px; display:none; }
 </style>
 </head>
@@ -158,10 +186,15 @@
   <div class="sidefoot">v0.1 · 本地优先 · 数据不出机器</div>
 </aside>
 
+<div id="sash" title="拖动调整宽度 · 双击复位"></div>
+
 <main id="main">
   <header id="topbar">
     <div class="ttitle"><span class="dot"></span><span id="sessTitle">新会话</span></div>
-    <div class="tinfo" id="info"></div>
+    <div class="tinfo">
+      <span id="info"></span>
+      <button id="themeBtn" type="button" title="主题：跟随系统">◐</button>
+    </div>
   </header>
   <div id="resumebar">
     <span>⚠ 上次任务没有跑完：<span class="task" id="resumeTask"></span></span>
@@ -238,6 +271,69 @@ let sessionId = null, activeId = null;
 let bubble = null, lastCard = null;
 const busySet = new Set();   // 正在跑 run 的 sessionId（null = 尚未落库的新会话）
 const streams = new Map();   // sessionId -> { runId, aborter, buffer: [[事件名, 数据]] }
+
+/* ---------- 主题：浅色 → 深色 → 跟随系统 循环；选择存 localStorage ---------- */
+
+const THEME_KEY = 'niulai-theme';
+const THEME_ORDER = ['light', 'dark', 'system'];
+const THEME_ICON = { light: '☀', dark: '☾', system: '◐' };
+const systemDark = matchMedia('(prefers-color-scheme: dark)');
+
+function applyTheme(mode) {
+  const eff = mode === 'system' ? (systemDark.matches ? 'dark' : 'light') : mode;
+  document.documentElement.dataset.theme = eff;
+  const btn = document.getElementById('themeBtn');
+  btn.textContent = THEME_ICON[mode];
+  btn.title = '主题：' + ({ light: '浅色', dark: '深色', system: '跟随系统' })[mode]
+    + '（点击切换）';
+}
+document.getElementById('themeBtn').addEventListener('click', () => {
+  const cur = localStorage.getItem(THEME_KEY) || 'system';
+  const next = THEME_ORDER[(THEME_ORDER.indexOf(cur) + 1) % THEME_ORDER.length];
+  localStorage.setItem(THEME_KEY, next);
+  applyTheme(next);
+});
+systemDark.addEventListener('change', () =>
+  applyTheme(localStorage.getItem(THEME_KEY) || 'system'));
+applyTheme(localStorage.getItem(THEME_KEY) || 'system');
+
+/* ---------- 侧栏拖宽：拖把手改宽度（200–420px），双击复位，宽度持久化 ---------- */
+
+const SIDEBAR_KEY = 'niulai-sidebar-w';
+const sidebarEl = document.getElementById('sidebar');
+const sash = document.getElementById('sash');
+
+function setSidebarW(w) {
+  w = Math.max(200, Math.min(420, w));
+  sidebarEl.style.width = w + 'px';
+  return w;
+}
+const savedW = parseInt(localStorage.getItem(SIDEBAR_KEY) || '', 10);
+if (savedW) setSidebarW(savedW);
+
+let dragX = null;
+sash.addEventListener('pointerdown', e => {
+  dragX = e.clientX;
+  sash.setPointerCapture(e.pointerId);
+  sash.classList.add('dragging');
+  document.body.classList.add('dragging');
+});
+sash.addEventListener('pointermove', e => {
+  if (dragX === null) return;
+  setSidebarW(sidebarEl.offsetWidth + e.clientX - dragX);
+  dragX = e.clientX;
+});
+sash.addEventListener('pointerup', () => {
+  if (dragX === null) return;
+  dragX = null;
+  sash.classList.remove('dragging');
+  document.body.classList.remove('dragging');
+  localStorage.setItem(SIDEBAR_KEY, String(sidebarEl.offsetWidth));
+});
+sash.addEventListener('dblclick', () => {
+  setSidebarW(260);
+  localStorage.removeItem(SIDEBAR_KEY);
+});
 
 fetch('/api/tools').then(r => r.json()).then(d => {
   document.getElementById('info').textContent =
