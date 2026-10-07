@@ -18,7 +18,6 @@ from niulai.datasource.eastmoney import (
     parse_kline,
     parse_moneyflow,
     parse_quote,
-    parse_sectors,
 )
 from niulai.errors import DataSourceError
 
@@ -338,56 +337,7 @@ async def test_k线请求失败会给可读报错():
     assert "K 线" in str(exc.value)
 
 
-# ---------------------------------------------------------------------- 板块 / 资金流
-
-# 实测抓取的板块行（字段代号映射见 SECTOR_FIELD_NAMES）
-SECTOR_ROWS = [
-    {
-        "f3": 6.06,
-        "f12": "BK1296",
-        "f14": "视频媒体",
-        "f62": 261217114.0,
-        "f104": 1,
-        "f105": 0,
-        "f128": "芒果超媒",
-        "f136": 6.06,
-        "f140": "300413",
-    },
-    {
-        "f3": 5.23,
-        "f12": "BK1500",
-        "f14": "医美耗材",
-        "f62": 72505887.0,
-        "f104": 3,
-        "f105": 0,
-        "f128": "锦波生物",
-        "f136": 10.28,
-        "f140": "920982",
-    },
-]
-
-
-def test_板块字段映射():
-    board = parse_sectors(SECTOR_ROWS, kind="concept", sort="change_pct")
-    assert board.source == "eastmoney"
-    assert len(board.rows) == 2
-
-    row = board.rows[0]
-    assert row.name == "视频媒体"
-    assert row.code == "BK1296"
-    assert row.change_pct == pytest.approx(6.06)
-    assert row.main_net == pytest.approx(261217114.0)
-    assert row.stock_up == 1
-    assert row.stock_down == 0
-    assert row.leader_name == "芒果超媒"
-    assert row.leader_change_pct == pytest.approx(6.06)
-
-
-def test_板块渲染带领涨股与净流入():
-    text = parse_sectors(SECTOR_ROWS, kind="concept", sort="change_pct").render()
-    assert "视频媒体" in text
-    assert "芒果超媒" in text
-    assert "2.61" in text  # 主力净流入 2.61 亿
+# ---------------------------------------------------------------------- 资金流
 
 
 def test_资金流主力等于大单加超大单():

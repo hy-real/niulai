@@ -39,7 +39,7 @@
 | 桌面形态 | **本地 HTTP + SSE + React**，壳最后套 | 开发期零摩擦；前端代码在 Web 阶段沉淀，套壳只是机械劳动 | 需要单独解决打包 |
 | 桌面壳 | **PyWebView 优先**，Tauri sidecar 备选 | PyWebView 是纯 Python、单语言；Tauri 体积更小但要碰 Rust | PyWebView 无官方自动更新 |
 | 存储 | **SQLite + JSONL trace** | 单文件、零运维；trace 用 JSONL 便于追加与回放 | 无并发写入能力（本地单用户够用） |
-| 数据源 | **akshare 主 + 东财 / 腾讯 HTTP 兜底** | akshare 覆盖广；纯 HTTP 分支轻量、无 pandas 依赖 | 两者都是非官方接口，需控频 |
+| 数据源 | **同花顺官方 API 主源 + 东财 / 腾讯 / 新浪 HTTP 兜底** | 官方接口：统一信封、字段有语义、`X-api-key` 鉴权，无灰色地带；纯 HTTP 兜底轻量、无 pandas 依赖 | 兜底源仍是非官方接口，需控频；THS 当前免费但无长期承诺，兜底链路必须保留 |
 | 包管理 | **uv**（workspace） | 快；自带 Python 版本管理，`uvx` 等价 npx | 生态较新 |
 | API Key | **系统凭据管理器**（keyring） | Windows Credential Manager / macOS Keychain | 各平台需分别验证 |
 | 依赖分发 | **PyPI + GitHub Releases** | PyPI 给开发者，Releases 给普通用户 | 双通道维护 |
@@ -82,7 +82,7 @@ flowchart TD
     end
 
     subgraph L6["数据源（按能力路由）"]
-        DS["akshare 主源 + 东财 / 腾讯 HTTP 兜底"]
+        DS["同花顺官方 API 主源 + 东财 / 腾讯 / 新浪兜底"]
     end
 
     subgraph L7["存储"]
@@ -252,7 +252,7 @@ sequenceDiagram
 
 ### 7.6 工具与数据源分离，按能力路由
 
-工具不认识 akshare / 东财。工具只调 `MarketDataService`：
+工具不认识同花顺 / 东财 / 新浪。工具只调 `MarketDataService`：
 
 ```python
 class MarketDataSource(Protocol):
@@ -471,7 +471,7 @@ session  ← 用户发起，生命周期以天 / 周计，是消息的容器
 
 **总原则**：每一格都建立在"上一步已经能跑"之上。**48 小时内必须跑通 P0，在此之前不改设计文档。**
 
-**当前进度（2026-10-07）**：P0–P2、P3.5、P4 已完成；P1 完成——原计划里的"成本统计（折算成钱）"**砍掉了**：本地自带 Key、按量自付，没有算钱的场景，只保留 token 统计；P5 的 Web 三栏界面与 P6 的 PyWebView 壳已能跑（只差打包流水线，见各行标注）。**数据源**：三源就位——东财（全能力主源）+ 腾讯（quote / kline 兜底）+ 新浪（quote / sector / sector_stocks / moneyflow 兜底），新增 `market_sectors` / `sector_stocks` / `stock_moneyflow` 三个工具，形成「板块榜 → 成分股 → 个股资金流」的追问链；实测中东财限流时行情自动切腾讯、板块自动切新浪，降级链路已联网验证。akshare adapter 有意不引入（会拖进 pandas，与纯 HTTP 设计冲突）。
+**当前进度（2026-10-07）**：P0–P2、P3.5、P4 已完成；P1 完成——原计划里的"成本统计（折算成钱）"**砍掉了**：本地自带 Key、按量自付，没有算钱的场景，只保留 token 统计；P5 的 Web 三栏界面与 P6 的 PyWebView 壳已能跑（只差打包流水线，见各行标注）。**数据源**：三源就位——同花顺官方 API（`datasource/ths.py`，quote / kline / financial / valuation / hotlist / limitup / dragontiger / anomaly 八个能力的主源，`X-api-key` 鉴权、统一信封、名称经 tickers/search 解析）+ 东财（quote / kline / financial / moneyflow 兜底）+ 腾讯（quote / kline 兜底）。**新浪已删除**，sector / sector_stocks 能力随之移除——「市场视野」改由 THS 热榜（关注度）、涨跌停池与连板天梯（情绪）、龙虎榜（席位）承接，工具矩阵扩到 9 个（stock_quote / stock_kline / stock_financial / stock_valuation / stock_anomaly / market_hot / market_limitup / market_dragontiger / stock_moneyflow）。THS 的资金流是端内专用接口调不了，moneyflow 仍由东财提供；THS 无 Key 时优雅退回东财链路。akshare adapter 有意不引入（会拖进 pandas，与纯 HTTP 设计冲突）。
 
 两处**有意的偏移**：一是原计划 P4 才做会话，实际提前做了，理由是它和"被中断的 transcript 修复"共用同一个入口；二是兜底源推后（见上）。P3.5（eval）已补上：10 条确定性断言 + 运行器（`evals/`），改 prompt 前后各跑一次。
 
@@ -480,7 +480,7 @@ session  ← 用户发起，生命周期以天 / 周计，是消息的容器
 | **P0 竖切片** ✅ | `niulai ask "茅台现在多少钱"` → 内核 → 1 个工具 → 流式输出 → trace JSONL | 一条命令跑通全链路，JSONL 里有完整的 LLM / 工具 / 用量记录 |
 | **P1 LLM Adapter** ✅ | 流式、取消（**Ctrl-C 要能贯穿到工具层**）、重试（错误分类）、用量（token）统计；OpenAI 兼容 / Anthropic 两套协议。原计划的"成本折算成钱"砍掉：自带 Key 按量自付，无算钱场景 | Ctrl-C 能中断正在跑的工具；429 会退避重试；400 立即失败不重试；每轮打印 tokens |
 | **P2 工具系统** ✅ | Tool registry、schema 校验、超时、**重复调用熔断**、大结果 artifact 落盘 + **配套的 `read_file` 工具**（只落盘不给读，数据就进了黑洞）；**协议留位：工具能力字段**（见 7.2 / 7.3 / 7.12） | 故意传错参数能拿到结构化错误并被模型自愈；10 万行结果不炸上下文，且模型能用 `read_file` 把需要的部分取回来；同参数重复调用被拦住 |
-| **P3 数据源** ✅ | 东财 HTTP（quote / kline / financial / sector / moneyflow，含限流重试）+ capability 路由框架；**腾讯兜底（quote / kline）与新浪兜底（quote / sector / sector_stocks / moneyflow）已落地**，akshare adapter 有意不引入（pandas 重依赖）；新增 `market_sectors` / `sector_stocks` / `stock_moneyflow` 工具 | 实测通过：东财被限流掐断时，行情自动切腾讯、板块自动切新浪，降级链路真实触发并恢复（2026-10-07） |
+| **P3 数据源** ✅ | 同花顺官方 API 主源（quote / kline / financial；周 / 月线由日线聚合，财务比率与同比由报表原文确定性计算，名称经 tickers/search 解析）+ 东财 / 腾讯 / 新浪兜底，capability 路由 + 限流重试；akshare adapter 有意不引入（pandas 重依赖） | 实测通过：东财被限流掐断时，行情自动切腾讯、板块自动切新浪；THS 无 Key 时优雅退回东财链路（2026-10-07） |
 | **P3.5 任务级 eval** ✅ | 10 条**确定性断言**（工具选择 / 反向路由 / 拒答边界 / 预算 / 自愈 / 落盘链路）+ 运行器（`evals/`，SKIP 不计入通过率） | 改一版 prompt 跑一次 eval，就能判断是变好还是变坏 |
 | **P4 存储与服务** ✅ | SQLite（会话存 `niulai.db`；自选 / 缓存随 P7 加表）+ **run journal 落盘与断点恢复**；FastAPI + SSE，只绑 127.0.0.1 + Host 校验；按会话隔离并发 | 浏览器能实时看到与 CLI 相同的事件流；杀掉进程后能从中断处恢复同一条 run |
 | **P5 界面** ✅ | 三栏：会话列表 / 对话流（含工具卡片）/ 恢复提示条（`apps/desktop/web/`，本地 HTTP + SSE） | 能提问、能看工具调用过程、能续接与恢复会话 |

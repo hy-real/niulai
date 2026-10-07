@@ -11,19 +11,25 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from ..errors import DataSourceError
 
 # 一个数据源可以声明的能力，Service 按 这里 的值筛源：
-#   quote      实时行情快照（最新价 / 涨跌 / 今开 / 最高 / 最低 / 成交量额）
-#   kline      历史 K 线（日 / 周 / 月，支持前复权 / 后复权）
-#   financial  定期报告主要财务指标（营收 / 归母净利 / ROE / 毛利率等）
-#   moneyflow  个股资金流（主力 / 超大单 / 大单 / 中单 / 小单 每日净流入）
-#   sector     板块行情榜（概念 / 行业，涨跌幅与主力净流入排序）
-#   sector_stocks  板块成分股列表（板块内逐股行情 + 估值）
-Capability = Literal["quote", "kline", "financial", "moneyflow", "sector", "sector_stocks"]
+#   quote       实时行情快照（最新价 / 涨跌 / 今开 / 最高 / 最低 / 成交量额）
+#   kline       历史 K 线（日 / 周 / 月，支持前复权 / 后复权）
+#   financial   定期报告主要财务指标（营收 / 归母净利 / ROE / 毛利率等）
+#   moneyflow   个股资金流（主力 / 超大单 / 大单 / 中单 / 小单 每日净流入）
+#   valuation   估值快照（PE TTM/MRQ、PB、PS、PCF）
+#   hotlist     同花顺热榜（热股榜 / 飙升榜）—— 市场关注度
+#   limitup     涨跌停 / 炸板股票池与连板天梯 —— 盘面情绪
+#   dragontiger 龙虎榜（全部 / 机构榜 / 游资榜）
+#   anomaly     个股异动原因（当日）
+Capability = Literal[
+    "quote", "kline", "financial", "moneyflow",
+    "valuation", "hotlist", "limitup", "dragontiger", "anomaly",
+]
 
 
 # ---------------------------------------------------------------- 格式化辅助
@@ -200,59 +206,84 @@ class FinancialSummary:
         return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------- 板块
+# ---------------------------------------------------------------------- 估值
 
 
 @dataclass(slots=True)
-class SectorRow:
-    """一个板块的榜单行。缺什么就 None，两个源的富余程度不同。"""
+class ValuationRow:
+    """一只股票的估值快照。负值原样保留 —— 亏损股 PE 为负是事实，不是错误。"""
 
-    code: str  # 如 BK1296 / gn_hwqc
+    code: str
     name: str
-    change_pct: float | None = None  # 板块涨跌幅 %
-    main_net: float | None = None  # 主力净流入（元），新浪没有
-    leader_name: str = ""  # 领涨股名称
-    leader_code: str = ""  # 领涨股代码
-    leader_change_pct: float | None = None  # 领涨股涨跌幅 %
-    stock_count: int | None = None  # 板块内个股总数
-    stock_up: int | None = None  # 上涨家数
-    stock_down: int | None = None  # 下跌家数
+    pe_ttm: float | None = None
+    pe_mrq: float | None = None
+    pb_mrq: float | None = None
+    ps_ttm: float | None = None
+    pcf_ttm: float | None = None
 
 
 @dataclass(slots=True)
-class SectorBoard:
-    """板块榜单。**榜的排序由数据源给出**，这里不做二次排序 —— 保持与用户
-    在源网站上看到的顺序一致，排序参数的语义由源自己兑现。"""
-
-    kind: str  # concept / industry
-    sort: str  # change_pct / moneyflow
-    rows: list[SectorRow]
+class ValuationList:
+    rows: list[ValuationRow]
     source: str = ""
     as_of: str = ""
 
-    KIND_LABEL = {"concept": "概念板块", "industry": "行业板块"}
-    SORT_LABEL = {"change_pct": "按涨跌幅", "moneyflow": "按主力净流入"}
+    def render(self) -> str:
+        if not self.rows:
+            return "没有取到估值数据。"
+        lines = [
+            "估值快照",
+            "字段：名称(代码), PE(TTM), PE(MRQ), PB(MRQ), PS(TTM), PCF(TTM)",
+        ]
+        for r in self.rows:
+            lines.append(
+                f"{r.name}({r.code}), {_money(r.pe_ttm)}, {_money(r.pe_mrq)}, "
+                f"{_money(r.pb_mrq)}, {_money(r.ps_ttm)}, {_money(r.pcf_ttm)}"
+            )
+        lines.append(
+            "注：PE 为负表示公司亏损（TTM 口径），不代表估值便宜；"
+            "银行 / 地产等重资产行业看 PB，高成长公司看 PS。"
+        )
+        lines.append(f"数据源：{self.source}　数据时间：{self.as_of}")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------- 热榜
+
+
+@dataclass(slots=True)
+class HotRow:
+    """热榜一行。热度值保留上游原始字符串（数值很大），排名变化正升负降。"""
+
+    code: str
+    name: str
+    rank: int
+    heat: str = ""
+    rank_change: int | None = None
+    trend: str = ""  # up / down / flat / unknown
+
+
+@dataclass(slots=True)
+class HotList:
+    board: str  # hot / skyrocket
+    period: str  # day / hour
+    rows: list[HotRow]
+    source: str = ""
+    as_of: str = ""
+
+    BOARD_LABEL = {"hot": "热股榜", "skyrocket": "飙升榜"}
 
     def render(self) -> str:
         if not self.rows:
-            return f"{self.KIND_LABEL.get(self.kind, self.kind)}没有取到数据。"
-
+            return f"{self.BOARD_LABEL.get(self.board, self.board)}没有取到数据。"
         lines = [
-            f"{self.KIND_LABEL.get(self.kind, self.kind)}（{self.SORT_LABEL.get(self.sort, self.sort)}排序，"
-            f"共 {len(self.rows)} 个）",
-            "字段：板块(代码), 涨跌幅(%), 主力净流入(亿), 个股(涨/跌或总数), 领涨股(涨跌幅%)",
+            f"同花顺{self.BOARD_LABEL.get(self.board, self.board)}"
+            f"（{'24小时' if self.period == 'day' else '小时'}级，共 {len(self.rows)} 只）",
+            "字段：排名, 名称(代码), 热度, 排名变化, 趋势",
         ]
         for r in self.rows:
-            count = (
-                f"{r.stock_up}/{r.stock_down}"
-                if r.stock_up is not None and r.stock_down is not None
-                else (str(r.stock_count) if r.stock_count is not None else "—")
-            )
-            leader = f"{r.leader_name}({_pct(r.leader_change_pct)})" if r.leader_name else "—"
-            main = "—" if r.main_net is None else f"{r.main_net / 1e8:.2f}"
-            lines.append(
-                f"{r.name}({r.code}), {_pct(r.change_pct)}, {main}, {count}, {leader}"
-            )
+            change = "—" if r.rank_change is None else f"{r.rank_change:+d}"
+            lines.append(f"{r.rank}, {r.name}({r.code}), {r.heat}, {change}, {r.trend}")
         lines.append(f"数据源：{self.source}　数据时间：{self.as_of}")
         return "\n".join(lines)
 
@@ -308,55 +339,184 @@ class MoneyflowSeries:
         return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------- 板块成分股
+# ---------------------------------------------------------------------- 涨跌停池
 
 
 @dataclass(slots=True)
-class SectorStockRow:
-    """板块内一只股票的快照。估值字段（pe / pb / 市值）新浪成分股接口独有。"""
+class LimitPoolRow:
+    """涨跌停 / 炸板池一行。三种池字段富余不同，缺什么就 None / 空串。"""
 
-    code: str  # 6 位代码
+    code: str
     name: str
-    price: float | None = None  # 最新价（元）
-    change_pct: float | None = None  # 涨跌幅 %
-    volume: float | None = None  # 成交量（手）
-    amount: float | None = None  # 成交额（元）
-    turnover: float | None = None  # 换手率 %
-    pe: float | None = None  # 市盈率
-    pb: float | None = None  # 市净率
-    market_cap: float | None = None  # 总市值（元）
-    float_cap: float | None = None  # 流通市值（元）
+    price: float | None = None
+    change_pct: float | None = None
+    time_text: str = ""  # 涨停时间 / 最后跌停时间（HH:MM）
+    continue_text: str = ""  # 连板文本，如「首板」「5天4板」
+    continue_cnt: int | None = None
+    reason: str = ""  # 涨停原因
+    seal_money: float | None = None  # 封单额（元）
+    open_times: int | None = None  # 炸板开板次数
+    turnover_pct: float | None = None  # 换手率 %
 
 
 @dataclass(slots=True)
-class SectorStockList:
-    node: str  # 板块节点代码，如 gn_hwqc
-    name: str  # 板块名称，如 华为汽车
-    rows: list[SectorStockRow]
-    sort: str = ""  # change_pct / amount / turnover
+class LimitPool:
+    kind: str  # up / down / break
+    total: int | None = None
+    rows: list[LimitPoolRow] = field(default_factory=list)
     source: str = ""
     as_of: str = ""
 
-    SORT_LABEL = {"change_pct": "按涨跌幅", "amount": "按成交额", "turnover": "按换手率"}
+    KIND_LABEL = {"up": "涨停池", "down": "跌停池", "break": "炸板池"}
 
     def render(self) -> str:
         if not self.rows:
-            return f"板块「{self.name}」（{self.node}）没有取到成分股数据。"
-
+            return f"{self.KIND_LABEL.get(self.kind, self.kind)}没有取到数据。"
+        total = f"，共 {self.total} 只" if self.total is not None else ""
         lines = [
-            f"板块「{self.name}」（{self.node}）成分股"
-            f"（{self.SORT_LABEL.get(self.sort, self.sort) or '默认排序'}，共 {len(self.rows)} 只）",
-            "字段：代码, 名称, 最新价, 涨跌幅(%), 成交额(亿), 换手率(%), 市盈率, 市净率, 总市值(亿)",
+            f"{self.KIND_LABEL.get(self.kind, self.kind)}（{total}）",
+            "字段：名称(代码), 价格, 涨跌幅(%), 时间, 连板, 原因, 封单(亿), 换手(%)",
         ]
         for r in self.rows:
-            cap = "—" if r.market_cap is None else f"{r.market_cap / 1e8:,.1f}"
-            amount = "—" if r.amount is None else f"{r.amount / 1e8:.2f}"
-            pe = "—" if r.pe is None else f"{r.pe:.1f}"
-            pb = "—" if r.pb is None else f"{r.pb:.2f}"
+            seal = "—" if r.seal_money is None else f"{r.seal_money / 1e8:.2f}"
+            turnover = _pct_raw(r.turnover_pct) or "—"
             lines.append(
-                f"{r.code}, {r.name}, {_money(r.price)}, {_pct(r.change_pct)}, "
-                f"{amount}, {_pct_raw(r.turnover) or '—'}, {pe}, {pb}, {cap}"
+                f"{r.name}({r.code}), {_money(r.price)}, {_pct(r.change_pct)}, "
+                f"{r.time_text or '—'}, {r.continue_text or '—'}, {r.reason or '—'}, "
+                f"{seal}, {turnover}"
             )
+        lines.append(f"数据源：{self.source}　数据时间：{self.as_of}")
+        return "\n".join(lines)
+
+
+@dataclass(slots=True)
+class LadderDay:
+    """连板天梯的一个交易日。boards 键：two_board … seven_over。"""
+
+    date: str
+    boards: dict[str, list[str]]  # 板位 → 「名称(代码)」列表
+
+
+@dataclass(slots=True)
+class LimitLadder:
+    days: list[LadderDay]
+    source: str = ""
+    as_of: str = ""
+
+    BOARD_LABEL = {
+        "two_board": "2板",
+        "three_board": "3板",
+        "four_board": "4板",
+        "five_board": "5板",
+        "six_board": "6板",
+        "seven_over": "7板+",
+    }
+
+    def render(self) -> str:
+        if not self.days:
+            return "连板天梯没有取到数据。"
+        labels = list(self.BOARD_LABEL)
+        lines = ["连板天梯（最新在前；每板位最多展示 4 只）"]
+        for day in self.days:
+            cells = []
+            for key in labels:
+                names = day.boards.get(key) or []
+                text = "、".join(names) if names else "—"
+                cells.append(f"{self.BOARD_LABEL[key]}: {text}")
+            lines.append(f"{day.date}　" + "　".join(cells))
+        lines.append(f"数据源：{self.source}　数据时间：{self.as_of}")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------- 龙虎榜
+
+
+@dataclass(slots=True)
+class DragonTigerRow:
+    """龙虎榜股票维度一行。金额一律元；涨跌幅由上游小数形式换算为百分数。"""
+
+    code: str
+    name: str
+    change_pct: float | None = None
+    net_value: float | None = None  # 龙虎榜净买入（元）
+    buy_value: float | None = None
+    sell_value: float | None = None
+    reason: str = ""  # 涨跌停原因
+    range_days: int | None = None  # 1 当日榜 / 3 三日榜
+    org_net_value: float | None = None  # 机构净买入（元）
+    org_buy_num: int | None = None
+    org_sell_num: int | None = None
+
+
+@dataclass(slots=True)
+class DragonTigerBoard:
+    board_type: str  # all / org / hot_money
+    trade_date: str = ""
+    stock_count: int | None = None
+    rows: list[DragonTigerRow] = field(default_factory=list)
+    hot_money: list[tuple[str, float]] = field(default_factory=list)  # 游资名, 净买入(元)
+    source: str = ""
+    as_of: str = ""
+
+    TYPE_LABEL = {"all": "全部", "org": "机构榜", "hot_money": "游资榜"}
+
+    def render(self) -> str:
+        label = self.TYPE_LABEL.get(self.board_type, self.board_type)
+        count = self.stock_count if self.stock_count is not None else len(self.rows)
+        lines = [f"龙虎榜 · {label}（{self.trade_date}，{count} 只股票）"]
+        if self.hot_money:
+            lines.append("字段：游资, 聚合净买入(亿)")
+            for name, value in self.hot_money:
+                lines.append(f"{name}, {value / 1e8:,.2f}")
+        else:
+            lines.append(
+                "字段：名称(代码), 涨跌幅(%), 净买入(亿), 上榜区间, 机构(净买入亿, 买/卖家数), 原因"
+            )
+            for r in self.rows:
+                if r.org_net_value is None:
+                    org = "—"
+                else:
+                    org = (
+                        f"{r.org_net_value / 1e8:+.2f}亿"
+                        f"({r.org_buy_num or 0}买/{r.org_sell_num or 0}卖)"
+                    )
+                lines.append(
+                    f"{r.name}({r.code}), {_pct(r.change_pct)}, {_yi(r.net_value)}, "
+                    f"{r.range_days or '—'}日榜, {org}, {r.reason or '—'}"
+                )
+        lines.append("注：净买入为正表示买方金额大于卖方；3 日榜为近三个交易日累计口径。")
+        lines.append(f"数据源：{self.source}　数据时间：{self.as_of}")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------- 异动原因
+
+
+@dataclass(slots=True)
+class AnomalyRow:
+    """一条异动解读。content 是上游生成的解读文本，给模型做参考。"""
+
+    code: str
+    name: str
+    tag: str = ""  # 大涨 / 涨停 / 快速拉升 …
+    content: str = ""
+    keywords: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class AnomalyList:
+    rows: list[AnomalyRow]
+    source: str = ""
+    as_of: str = ""
+
+    def render(self) -> str:
+        if not self.rows:
+            return "这些标的今日没有异动记录。"
+        lines = [f"当日异动原因（{len(self.rows)} 条）"]
+        for r in self.rows:
+            keywords = f"　关键词：{'、'.join(r.keywords)}" if r.keywords else ""
+            lines.append(f"◆ {r.name}（{r.code}）[{r.tag}]{keywords}")
+            lines.append(f"  {r.content}")
         lines.append(f"数据源：{self.source}　数据时间：{self.as_of}")
         return "\n".join(lines)
 

@@ -40,8 +40,6 @@ from .base import (
     MoneyflowDay,
     MoneyflowSeries,
     Quote,
-    SectorBoard,
-    SectorRow,
 )
 
 _log = get_logger("datasource.eastmoney")
@@ -57,8 +55,8 @@ SEARCH_URL = "https://searchapi.eastmoney.com/api/suggest/get"
 # 定期报告主要财务指标：营收 / 归母净利 / ROE 等。那边一次返回 165 个字段，
 # 只挑 FINANCE_FIELDS 里列的这些
 FINANCE_URL = "https://datacenter.eastmoney.com/securities/api/data/get"
-# 板块榜单：概念 / 行业，一次返回板块涨跌幅、主力净流入、领涨股
-SECTOR_URL = "https://push2.eastmoney.com/api/qt/clist/get"
+# 板块榜单已移除（2026-10-07）：THS 热榜 / 涨跌停池接棒了"市场视野"角色，
+# 东财保留 quote / kline / financial / moneyflow 四个核心兜底能力。
 # 个股资金流日序列：主力 = 超大单 + 大单，按天给净流入与净占比
 MONEYFLOW_URL = "https://push2.eastmoney.com/api/qt/stock/fflow/daykline/get"
 
@@ -119,23 +117,6 @@ KLINE_INDEX = {
 KLT = {"daily": "101", "weekly": "102", "monthly": "103"}
 FQT = {"none": "0", "forward": "1", "backward": "2"}
 
-# 板块：fs 决定板块类型，fid 决定排序字段（po=1 倒序 = 从高到低）
-SECTOR_FS = {"concept": "m:90+t:2", "industry": "m:90+t:1"}
-SECTOR_FID = {"change_pct": "f3", "moneyflow": "f62"}
-# 板块行的字段代号，实测锁定的映射（f136 领涨股涨跌幅、f140 领涨股代码）
-SECTOR_FIELD_NAMES = {
-    "change_pct": "f3",
-    "code": "f12",
-    "name": "f14",
-    "main_net": "f62",
-    "stock_up": "f104",
-    "stock_down": "f105",
-    "leader_name": "f128",
-    "leader_change_pct": "f136",
-    "leader_code": "f140",
-}
-SECTOR_FIELDS = ",".join(SECTOR_FIELD_NAMES.values())
-
 # 资金流 fields2 的字段顺序固定，按位置解析（与 KLINE_INDEX 同理）
 MONEYFLOW_FIELDS = "f51,f52,f53,f54,f55,f56,f62,f63"
 MONEYFLOW_INDEX = {
@@ -173,7 +154,7 @@ class EastmoneyDataSource:
     """东方财富源：行情 / K 线 / 财务。"""
 
     id = "eastmoney"
-    capabilities: set[Capability] = {"quote", "kline", "financial", "sector", "moneyflow"}
+    capabilities: set[Capability] = {"quote", "kline", "financial", "moneyflow"}
 
     def __init__(
         self,
@@ -275,38 +256,6 @@ class EastmoneyDataSource:
             )
 
         return parse_financial(rows, fallback_symbol=code)
-
-    # ------------------------------------------------------------------ 板块
-
-    async def sectors(
-        self,
-        *,
-        kind: str = "concept",
-        sort: str = "change_pct",
-        limit: int = 10,
-    ) -> SectorBoard:
-        if kind not in SECTOR_FS:
-            raise DataSourceError(f"不支持的板块类型「{kind}」，可选：{'、'.join(SECTOR_FS)}")
-        if sort not in SECTOR_FID:
-            raise DataSourceError(f"不支持的排序方式「{sort}」，可选：{'、'.join(SECTOR_FID)}")
-
-        params = {
-            "pn": "1",  # 第一页
-            "pz": str(max(1, min(limit, 100))),
-            "po": "1",  # 倒序（从高到低）
-            "np": "1",
-            "fltt": "2",  # 数值已按小数位缩放好
-            "invt": "2",
-            "fid": SECTOR_FID[sort],
-            "fs": SECTOR_FS[kind],
-            "fields": SECTOR_FIELDS,
-        }
-        payload = await self._get_json(SECTOR_URL, params, headers=_QUOTE_HEADERS, what="板块")
-        rows = ((payload.get("data") or {}).get("diff")) or []
-        if not rows:
-            raise DataSourceError(f"eastmoney 没有返回{kind}板块榜单")
-
-        return parse_sectors(rows, kind=kind, sort=sort)
 
     # ------------------------------------------------------------------ 资金流
 
@@ -521,27 +470,6 @@ def parse_financial(rows: list[dict[str, Any]], *, fallback_symbol: str = "") ->
     )
 
 
-def parse_sectors(rows: list[dict[str, Any]], *, kind: str, sort: str) -> SectorBoard:
-    """把 clist 的板块行转成 `SectorBoard`。字段名映射见 SECTOR_FIELD_NAMES。"""
-    sectors = [
-        SectorRow(
-            code=str(row.get(SECTOR_FIELD_NAMES["code"]) or ""),
-            name=str(row.get(SECTOR_FIELD_NAMES["name"]) or ""),
-            change_pct=_num(row.get(SECTOR_FIELD_NAMES["change_pct"])),
-            main_net=_num(row.get(SECTOR_FIELD_NAMES["main_net"])),
-            leader_name=str(row.get(SECTOR_FIELD_NAMES["leader_name"]) or ""),
-            leader_code=str(row.get(SECTOR_FIELD_NAMES["leader_code"]) or ""),
-            leader_change_pct=_num(row.get(SECTOR_FIELD_NAMES["leader_change_pct"])),
-            stock_up=_count(row.get(SECTOR_FIELD_NAMES["stock_up"])),
-            stock_down=_count(row.get(SECTOR_FIELD_NAMES["stock_down"])),
-        )
-        for row in rows
-        if row.get(SECTOR_FIELD_NAMES["name"])
-    ]
-
-    return SectorBoard(kind=kind, sort=sort, rows=sectors, source="eastmoney", as_of=_now())
-
-
 def parse_moneyflow(data: dict[str, Any], *, fallback_symbol: str = "") -> MoneyflowSeries:
     """把 fflow/daykline 的 CSV 行转成 `MoneyflowSeries`。
 
@@ -575,11 +503,6 @@ def parse_moneyflow(data: dict[str, Any], *, fallback_symbol: str = "") -> Money
         source="eastmoney",
         as_of=_now(),
     )
-
-
-def _count(value: Any) -> int | None:
-    """家数类字段：正常是整数，异常（'-' 等）给 None，别让类型渗出去。"""
-    return value if isinstance(value, int) else None
 
 
 def _guess_market(code: str) -> str:

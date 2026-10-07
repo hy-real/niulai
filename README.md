@@ -43,6 +43,9 @@ pip install -e packages/niulai
 export NIULAI_API_KEY="sk-..."
 export NIULAI_MODEL="deepseek-chat"                      # 可选
 export NIULAI_BASE_URL="https://api.deepseek.com/v1"     # 可选
+export NIULAI_THS_API_KEY="sk-fuyao-..."                 # 可选：同花顺数据源 Key，缺省退回东财
+# 同花顺 Key 申请：登录 https://fuyao.aicubes.cn/admin/ → API Key 管理 → 创建
+# 热榜 / 涨跌停池 / 龙虎榜 / 估值 / 异动等市场数据依赖它；也可以在 Web 界面的设置里填
 
 niulai ask "茅台现在多少钱"        # 问一次
 niulai chat                        # 或者进入多轮对话（会记住上下文）
@@ -116,6 +119,9 @@ config.toml 示例（只写想改的，其余用默认值）：
 model = "deepseek-chat"
 max_turns = 12                  # 单次提问最多几轮工具循环
 
+[datasource]
+# ths_api_key = "sk-fuyao-..."  # 同花顺数据源 Key；也可用环境变量 NIULAI_THS_API_KEY（优先）
+
 [log]
 # level = "debug"               # 等价于环境变量 NIULAI_LOG_LEVEL
 ```
@@ -148,7 +154,8 @@ $env:NIULAI_LOG_FILE="d:\tmp\niulai.log"   # 可选：不设且级别开到 INFO
 | 重试与错误分类（可重试 vs 终止，带抖动退避） | ✅ |
 | Anthropic 提示缓存（省输入费用） | ✅ |
 | **多轮会话**（历史持久化，可续接） | ✅ |
-| **行情 / K 线 / 财务摘要** 三个只读工具 | ✅ |
+| **单标的工具**：行情 / K 线 / 财务 / 估值 / 当日异动原因 | ✅ |
+| **市场视野**：热股榜 / 飙升榜 / 涨跌停池 / 连板天梯 / 龙虎榜 / 资金流 | ✅ |
 | **大结果落盘**，只把摘要 + 路径送进上下文，配 `read_file` 分页读 | ✅ |
 | **上下文压缩**（早期工具结果换成占位说明，结构不动） | ✅ |
 | **运行时熔断**（重复调用 / 连续失败被拦下，不靠模型自觉） | ✅ |
@@ -156,7 +163,8 @@ $env:NIULAI_LOG_FILE="d:\tmp\niulai.log"   # 可选：不设且级别开到 INFO
 | 数据源限流自动重试 | ✅ |
 | **会话存储 SQLite**（单文件 `niulai.db`） | ✅ |
 | Token 统计（每轮 / 累计；不做费用换算——自带 Key 无需算钱） | ✅ |
-| 数据源兜底（腾讯 / 新浪 / akshare） | ⏳ 有意延后，见路线图 |
+| **同花顺官方 API 主源**（行情 / K 线 / 财务 / 估值 / 热榜 / 涨跌停 / 龙虎榜 / 异动） | ✅ 需 `NIULAI_THS_API_KEY` |
+| 东财 / 腾讯兜底（资金流 + 行情降级） | ✅ |
 | 本地 Web 界面（三栏） | ✅ |
 | 桌面安装包（双击即用） | ⏳ P6（壳已就位，差打包流水线） |
 | 自选股 / 条件预警 / 盘后复盘 | ⏳ P7 |
@@ -176,7 +184,7 @@ $env:NIULAI_LOG_FILE="d:\tmp\niulai.log"   # 可选：不设且级别开到 INFO
   理解清楚再谈抽象。
 - **两套协议，一套中间表示。** 模型厂商的差异（system 位置、工具 schema、流式事件形状、
   私有内容块）全部沉在适配层，内核只认一个 `LLMClient` 接口。
-- **工具与数据源分离。** 工具不认识东财或 akshare，只调 `MarketDataService`，按能力路由。
+- **工具与数据源分离。** 工具不认识同花顺、东财或新浪，只调 `MarketDataService`，按能力路由。
   换源 = 加一个实现类。
 - **大结果落盘，不做静默截断。** 截断会让模型拿到残数据却不知道缺了什么，
   于是给出一个"看起来对"的结论 —— 这比直接报错更糟。落盘 + 摘要 + 路径 + `read_file` 才是对的。

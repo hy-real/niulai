@@ -30,7 +30,7 @@ from typing import Any
 from . import __version__
 from .agent import AgentRuntime, RunResult
 from .artifacts import ArtifactStore
-from .config import Settings, read_config_file
+from .config import Settings, read_config_file, read_ths_api_key
 from .datasource import build_default_service
 from .errors import ConfigError, NiulaiError
 from .events import Event, EventEmitter, EventType, new_run_id
@@ -39,7 +39,7 @@ from .llm import Usage, build_client
 from .logs import setup_logging
 from .session import Session, SessionStore
 from .trace import TraceResumeError, TraceWriter, load_transcript, read_trace, resolve_run
-from .tools import ReadFileTool, ToolRegistry, build_market_tools
+from .tools import ReadFileTool, ToolRegistry, build_market_tools, build_stock_tools
 
 STOP_REASON_LABEL = {
     "done": "正常结束",
@@ -189,9 +189,9 @@ class Assembly:
 
 def _assemble(settings: Settings) -> Assembly:
     store = ArtifactStore()
-    service = build_default_service()
+    service = build_default_service(ths_api_key=read_ths_api_key())
     tools = ToolRegistry(
-        [*build_market_tools(service), ReadFileTool(store)],
+        [*build_stock_tools(service), *build_market_tools(service), ReadFileTool(store)],
         artifact_store=store,
     )
     llm = build_client(settings)
@@ -583,11 +583,17 @@ def _indent(text: str, prefix: str) -> str:
 
 def _cmd_tools() -> int:
     store = ArtifactStore()
-    service = build_default_service()
-    tools = ToolRegistry([*build_market_tools(service), ReadFileTool(store)], artifact_store=store)
+    service = build_default_service(ths_api_key=read_ths_api_key())
+    tools = ToolRegistry(
+        [*build_stock_tools(service), *build_market_tools(service), ReadFileTool(store)],
+        artifact_store=store,
+    )
 
     print(f"数据源：{'、'.join(service.source_ids)}")
-    for capability in ("quote", "kline", "financial", "sector", "sector_stocks", "moneyflow"):
+    for capability in (
+        "quote", "kline", "financial", "moneyflow",
+        "valuation", "hotlist", "limitup", "dragontiger", "anomaly",
+    ):
         sources = [s.id for s in service.sources_for(capability)]  # type: ignore[arg-type]
         print(f"  · {capability:<10} {'、'.join(sources) or '（无）'}")
 

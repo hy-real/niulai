@@ -62,6 +62,15 @@ KEY_ENV_VARS: dict[str, tuple[str, ...]] = {
     "anthropic": ("NIULAI_API_KEY", "ANTHROPIC_API_KEY"),
 }
 
+# 同花顺数据源 Key（与 LLM Key 同一套优先级：env > config.toml）
+THS_KEY_ENV_VAR = "NIULAI_THS_API_KEY"
+
+
+def read_ths_api_key(config_file: Path | None = None) -> str:
+    """读同花顺数据源 API Key：env NIULAI_THS_API_KEY > config.toml [datasource] ths_api_key。"""
+    datasource = _section(read_config_file(config_file), "datasource")
+    return _env(THS_KEY_ENV_VAR) or _clean(datasource.get("ths_api_key")) or ""
+
 DEFAULT_MAX_TURNS = 12
 DEFAULT_TOOL_TIMEOUT_S = 15.0
 DEFAULT_MAX_RETRIES = 2

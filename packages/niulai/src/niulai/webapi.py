@@ -37,7 +37,7 @@ from pydantic import BaseModel
 
 from .agent.loop import _repair_transcript
 from .cli import Assembly, _assemble
-from .config import Settings
+from .config import Settings, read_ths_api_key
 from .datasource.base import Capability
 from .errors import ConfigError
 from .events import EventEmitter, EventType, new_run_id
@@ -150,6 +150,7 @@ class ConfigUpdate(BaseModel):
     base_url: str | None = None
     model: str | None = None
     api_key: str | None = None
+    ths_api_key: str | None = None
     max_turns: int | None = None
     tool_timeout_s: float | None = None
     keep_recent_tool_results: int | None = None
@@ -186,20 +187,23 @@ def _history_view(messages: list[Any]) -> list[dict[str, Any]]:
 
 
 def create_app() -> FastAPI:
-    # 装配缓存：key 是不可变的 Settings 值。配置没变 → 复用同一份装配
+    # 装配缓存：key 是 (Settings, 同花顺 Key)。配置没变 → 复用同一份装配
     # （LLM 的 httpx 连接池、将来 P3 的限流器 / 结果缓存，都是只有跨请求
     # 共享才成立的全局状态——每请求新建等于让它们失效）；配置变了（PUT
     # /api/config 或 env）→ 新 key 自然 miss，重建即可，"保存后即生效"
-    # 的动态刷新语义不受影响。缓存放 create_app 里而不是模块级：
+    # 的动态刷新语义不受影响。同花顺 Key 不在 Settings 里（它决定数据源
+    # 装配，而不是 LLM 装配），所以要单独进缓存键 —— 否则界面里配了 Key
+    # 也不会生效。缓存放 create_app 里而不是模块级：
     # ArtifactStore 的数据目录在构造时解析，模块级会抢在测试设置
     # NIULAI_HOME 之前定型（SessionStore 同理，见下）。
-    _asm_cache: dict[Settings, Assembly] = {}
+    _asm_cache: dict[tuple[Settings, str], Assembly] = {}
 
     def _get_asm(settings: Settings) -> Assembly:
-        asm = _asm_cache.get(settings)
+        cache_key = (settings, read_ths_api_key())
+        asm = _asm_cache.get(cache_key)
         if asm is None:
             asm = _assemble(settings)
-            _asm_cache[settings] = asm
+            _asm_cache[cache_key] = asm
         return asm
 
     @asynccontextmanager
@@ -250,7 +254,8 @@ def create_app() -> FastAPI:
         # cap 显式标注为 Capability：写错能力名（如 "k_lines"）会在类型检查阶段报错，
         # 而不是静默返回空列表让前端对着一张空的 routing 表猜原因。
         caps: tuple[Capability, ...] = (
-            "quote", "kline", "financial", "sector", "sector_stocks", "moneyflow",
+            "quote", "kline", "financial", "moneyflow",
+            "valuation", "hotlist", "limitup", "dragontiger", "anomaly",
         )
         routing = {cap: [s.id for s in asm.service.sources_for(cap)] for cap in caps}
         return {"sources": asm.service.source_ids, "routing": routing, "tools": out_tools}
@@ -349,6 +354,7 @@ def create_app() -> FastAPI:
     def api_get_config():
         """当前生效的配置（env 与 config.toml 合并后的视图，Key 只回尾号）。"""
         settings = Settings.load(require_key=False)
+        ths_key = read_ths_api_key()
         return {
             "protocol": settings.protocol,
             "base_url": settings.base_url,
@@ -358,6 +364,8 @@ def create_app() -> FastAPI:
             "keep_recent_tool_results": settings.keep_recent_tool_results,
             "has_key": bool(settings.api_key),
             "key_hint": ("已配置（尾号 " + settings.api_key[-4:] + "）") if settings.api_key else "未配置",
+            "has_ths_key": bool(ths_key),
+            "ths_key_hint": ("已配置（尾号 " + ths_key[-4:] + "）") if ths_key else "未配置",
         }
 
     @app.put("/api/config")
@@ -378,6 +386,7 @@ def create_app() -> FastAPI:
 
         updates = req.model_dump(exclude_none=True)
         key = updates.pop("api_key", None)
+        ths_key = updates.pop("ths_api_key", None)
         if key is not None and key.strip():
             llm["api_key"] = key.strip()
         for field, value in updates.items():
@@ -385,6 +394,12 @@ def create_app() -> FastAPI:
                 continue  # 空串 = 不修改
             llm[field] = value
         data["llm"] = llm
+
+        # 同花顺 Key 单独进 [datasource] 节 —— env NIULAI_THS_API_KEY 优先于文件
+        if ths_key is not None and ths_key.strip():
+            datasource = data.get("datasource") if isinstance(data.get("datasource"), dict) else {}
+            datasource["ths_api_key"] = ths_key.strip()
+            data["datasource"] = datasource
 
         path = config_file_path()
         try:

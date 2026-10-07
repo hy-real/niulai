@@ -4,7 +4,7 @@ P0 先做最简单的"按顺序试，记录失败原因"。
 P3 会补上优先级排序、健康度降权、结果缓存与限流。
 
 三个取数方法走的是同一套路由逻辑：**先按 capability 筛源，再逐个试，
-全失败才报错**。这样加一个源（腾讯 / 新浪 / akshare）不需要动这里。
+全失败才报错**。这样加一个源（腾讯 / akshare）不需要动这里。
 """
 
 from __future__ import annotations
@@ -13,21 +13,28 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeVar
 
 from ..errors import DataSourceError
+from ..logs import get_logger
 from .base import (
+    AnomalyList,
     Capability,
+    DragonTigerBoard,
     FinancialSummary,
+    HotList,
     KlineSeries,
+    LimitLadder,
+    LimitPool,
     MarketDataSource,
     MoneyflowSeries,
     Quote,
-    SectorBoard,
-    SectorStockList,
+    ValuationList,
 )
 from .eastmoney import EastmoneyDataSource
-from .sina import SinaDataSource
 from .tencent import TencentDataSource
+from .ths import ThsDataSource
 
 T = TypeVar("T")
+
+_log = get_logger("datasource.service")
 
 
 class MarketDataService:
@@ -69,29 +76,39 @@ class MarketDataService:
         """定期报告主要财务指标：营收 / 归母净利 / ROE / 毛利率等，最近 periods 期。"""
         return await self._route("financial", "financial", symbol, periods=periods)
 
-    async def sectors(
-        self,
-        *,
-        kind: str = "concept",
-        sort: str = "change_pct",
-        limit: int = 10,
-    ) -> SectorBoard:
-        """板块榜单：concept / industry，按 change_pct 或 moneyflow 排序，前 limit 个。"""
-        return await self._route("sector", "sectors", kind=kind, sort=sort, limit=limit)
+    async def valuation(self, symbol: str) -> ValuationList:
+        """估值快照：PE / PB / PS / PCF，`symbol` 支持逗号分隔多个。"""
+        return await self._route("valuation", "valuation", symbol)
+
+    async def hotlist(
+        self, *, board: str = "hot", period: str = "day", limit: int = 10
+    ) -> HotList:
+        """同花顺热榜：hot 热股榜 / skyrocket 飙升榜。"""
+        return await self._route("hotlist", "hotlist", board=board, period=period, limit=limit)
+
+    async def limitpool(self, *, kind: str = "up", limit: int = 20) -> LimitPool:
+        """涨跌停 / 炸板股票池：up / down / break。"""
+        return await self._route("limitup", "limitpool", kind=kind, limit=limit)
+
+    async def limit_ladder(self, *, days: int = 5) -> LimitLadder:
+        """连板天梯：最近 days 个交易日的连板梯队。"""
+        return await self._route("limitup", "limit_ladder", days=days)
+
+    async def dragon_tiger(
+        self, *, board_type: str = "all", date: str | None = None
+    ) -> DragonTigerBoard:
+        """龙虎榜：all / org / hot_money。"""
+        return await self._route(
+            "dragontiger", "dragon_tiger", board_type=board_type, date=date
+        )
+
+    async def anomaly(self, symbol: str) -> AnomalyList:
+        """当日异动原因，`symbol` 支持逗号分隔多个。"""
+        return await self._route("anomaly", "anomaly", symbol)
 
     async def moneyflow(self, symbol: str, *, days: int = 5) -> MoneyflowSeries:
         """个股资金流：主力 / 超大单 / 大单 / 中单 / 小单，最近 days 个交易日。"""
         return await self._route("moneyflow", "moneyflow", symbol, days=days)
-
-    async def sector_stocks(
-        self,
-        symbol: str,
-        *,
-        sort: str = "change_pct",
-        limit: int = 10,
-    ) -> SectorStockList:
-        """板块成分股：板块内逐股行情 + 估值，`symbol` 是板块代码或名称。"""
-        return await self._route("sector_stocks", "sector_stocks", symbol, sort=sort, limit=limit)
 
     async def aclose(self) -> None:
         for source in self._sources:
@@ -126,15 +143,25 @@ class MarketDataService:
         raise DataSourceError(f"所有数据源都失败了 —— {' | '.join(failures)}")
 
 
-def build_default_service() -> MarketDataService:
-    """东财主源（覆盖最全 + 唯一的名称搜索），腾讯 / 新浪兜底。
+def build_default_service(ths_api_key: str | None = None) -> MarketDataService:
+    """同花顺官方 API 主源，东财 / 腾讯兜底。
 
-    路由顺序即兜底顺序：
-    - quote / kline：东财 → 腾讯 → 新浪；
-    - sector / moneyflow：东财 → 新浪（腾讯没有这两个能力）；
-    - financial：只有东财。
+    路由顺序即兜底顺序（THS 在最前）：
+    - quote / kline / financial / valuation / hotlist / limitup / dragontiger / anomaly：ths；
+    - moneyflow：THS 的资金流是端内专用接口调不了，由东财提供；
+    - quote / kline / financial 的兜底：ths 失败 → 东财 → 腾讯。
 
-    中文名称腾讯 / 新浪解析不了 —— 它们收到名称会显式抛错，错误被路由层
-    记进失败原因里，不影响「试下一个源」的链条。
+    THS 需要 API Key（env `NIULAI_THS_API_KEY` 或 config.toml `[datasource]`）；
+    没配时不注册 THS、退回纯东财链路 —— 打一条 warning，不拦运行。
     """
-    return MarketDataService([EastmoneyDataSource(), TencentDataSource(), SinaDataSource()])
+    sources: list[MarketDataSource] = []
+    if ths_api_key:
+        sources.append(ThsDataSource(api_key=ths_api_key))
+    else:
+        _log.warning(
+            "未配置同花顺 API Key（%s 或 config.toml [datasource] ths_api_key），"
+            "本次只使用东财 / 腾讯兜底源",
+            "NIULAI_THS_API_KEY",
+        )
+    sources += [EastmoneyDataSource(), TencentDataSource()]
+    return MarketDataService(sources)

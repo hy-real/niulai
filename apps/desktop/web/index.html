@@ -87,6 +87,16 @@
                       border-radius:8px; padding:4px 12px; font:12px var(--sans); cursor:pointer; }
   #resumebar #resumeBtn { border-color:var(--yellow); color:var(--yellow); font-weight:600; }
   #resumebar #resumeBtn:hover { background:var(--yellow); color:#fff; }
+  /* 同花顺 Key 配置提示条（结构复用 resumebar 的布局） */
+  #thsbar { display:none; align-items:center; justify-content:space-between; gap:10px;
+            padding:8px 20px; background:var(--warn-bg); border-bottom:1px solid var(--warn-border);
+            font-size:12.5px; color:var(--warn-text); }
+  #thsbar.show { display:flex; }
+  #thsbar a { text-decoration:none; }
+  #thsbar button, #thsbar a button { background:var(--panel); border:1px solid var(--border2); color:var(--text);
+                      border-radius:8px; padding:4px 12px; font:12px var(--sans); cursor:pointer; }
+  #thsbar #thsCfgBtn { border-color:var(--yellow); color:var(--yellow); font-weight:600; }
+  #thsbar #thsCfgBtn:hover { background:var(--yellow); color:#fff; }
 
   /* ---------- 聊天区 ---------- */
   #main { flex:1; display:flex; flex-direction:column; min-width:0; position:relative; }
@@ -203,6 +213,14 @@
       <button id="resumeDismiss" type="button">忽略</button>
     </span>
   </div>
+  <div id="thsbar">
+    <span>📊 热榜 / 涨跌停池 / 龙虎榜 / 估值 / 异动等市场数据需要同花顺 API Key（当前未配置，行情走兜底源）</span>
+    <span style="display:flex; gap:6px;">
+      <a href="https://fuyao.aicubes.cn/admin/" target="_blank" rel="noopener"><button type="button">申请 Key ↗</button></a>
+      <button id="thsCfgBtn" type="button">去设置</button>
+      <button id="thsDismiss" type="button">忽略</button>
+    </span>
+  </div>
   <div id="chatwrap">
     <div id="chat"></div>
     <div id="empty">
@@ -240,6 +258,9 @@
       <input id="cfg_model" placeholder="如 moonshot-v1-8k"></div>
     <div class="field"><label>API Key（留空 = 不修改）</label>
       <input id="cfg_key" type="password"></div>
+    <div class="field"><label>同花顺数据源 API Key（留空 = 不修改）　<a href="https://fuyao.aicubes.cn/admin/" target="_blank" rel="noopener">申请 Key ↗</a></label>
+      <input id="cfg_ths_key" type="password">
+      <div class="hint">热榜 / 涨跌停池 / 龙虎榜 / 估值 / 异动等市场数据依赖它；未配置时行情走东财 / 腾讯兜底</div></div>
     <div class="row2">
       <div class="field"><label>单次提问最大轮数</label>
         <input id="cfg_max_turns" type="number" min="1"></div>
@@ -637,6 +658,8 @@ document.getElementById('settingsBtn').addEventListener('click', () => {
     document.getElementById('cfg_model').value = c.model || '';
     document.getElementById('cfg_key').value = '';
     document.getElementById('cfg_key').placeholder = c.key_hint || '';
+    document.getElementById('cfg_ths_key').value = '';
+    document.getElementById('cfg_ths_key').placeholder = c.ths_key_hint || '';
     document.getElementById('cfg_max_turns').value = c.max_turns;
     document.getElementById('cfg_tool_timeout_s').value = c.tool_timeout_s;
     document.getElementById('cfg_keep_recent_tool_results').value = c.keep_recent_tool_results;
@@ -657,6 +680,7 @@ document.getElementById('saveCfg').addEventListener('click', () => {
     base_url: document.getElementById('cfg_base_url').value.trim(),
     model: document.getElementById('cfg_model').value.trim(),
     api_key: document.getElementById('cfg_key').value,
+    ths_api_key: document.getElementById('cfg_ths_key').value,
     max_turns: num('cfg_max_turns'),
     tool_timeout_s: num('cfg_tool_timeout_s'),
     keep_recent_tool_results: num('cfg_keep_recent_tool_results'),
@@ -669,8 +693,27 @@ document.getElementById('saveCfg').addEventListener('click', () => {
     note.style.display = '';
     if (!ok) { note.className = 'err'; note.textContent = '✗ ' + (j.detail || '保存失败'); return; }
     note.className = ''; note.textContent = '✓ 已保存，下一条提问即生效';
+    refreshThsBar();          // 可能刚配了（或还没配）同花顺 Key，提示条即时刷新
     setTimeout(() => overlay.classList.remove('show'), 1200);
   }).catch(() => {});
+});
+
+/* ---------- 同花顺 Key 提示条：模型 Key 已配但数据源 Key 未配时提示 ---------- */
+
+const THS_DISMISS_KEY = 'niulai-ths-hint-dismissed';
+function refreshThsBar() {
+  fetch('/api/config').then(r => r.json()).then(c => {
+    const show = c.has_key && !c.has_ths_key && !localStorage.getItem(THS_DISMISS_KEY);
+    document.getElementById('thsbar').classList.toggle('show', !!show);
+  }).catch(() => {});
+}
+document.getElementById('thsCfgBtn').addEventListener('click', () => {
+  document.getElementById('thsbar').classList.remove('show');
+  document.getElementById('settingsBtn').click();   // 直接打开设置面板
+});
+document.getElementById('thsDismiss').addEventListener('click', () => {
+  localStorage.setItem(THS_DISMISS_KEY, '1');
+  document.getElementById('thsbar').classList.remove('show');
 });
 
 /* ---------- 启动：快捷提问 + 会话列表 ---------- */
@@ -680,6 +723,7 @@ document.querySelectorAll('.chip').forEach(b =>
 
 loadSessions();
 updateEmpty();   // 首次打开：无历史会话时直接进入首页式布局
+refreshThsBar(); // 启动时检查同花顺 Key 是否已配置
 fetch('/api/sessions').then(r => r.json()).then(list => {
   if (list.length) openSession(list[0].id);
 }).catch(() => {});

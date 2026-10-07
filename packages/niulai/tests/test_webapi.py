@@ -29,16 +29,14 @@ def test_tools端点列出数据源与工具(monkeypatch, tmp_path):
     resp = client.get("/api/tools")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["sources"] == ["eastmoney", "tencent", "sina"]
-    assert data["routing"]["quote"] == ["eastmoney", "tencent", "sina"]
-    assert data["routing"]["moneyflow"] == ["eastmoney", "sina"]
+    assert data["sources"] == ["eastmoney", "tencent"]
+    assert data["routing"]["quote"] == ["eastmoney", "tencent"]
+    assert data["routing"]["moneyflow"] == ["eastmoney"]
     names = {t["name"] for t in data["tools"]}
     assert {
         "stock_quote",
         "stock_kline",
         "stock_financial",
-        "market_sectors",
-        "sector_stocks",
         "stock_moneyflow",
         "read_file",
     } <= names
@@ -189,6 +187,42 @@ def test_写入配置时api_key留空不清空原key(monkeypatch, tmp_path):
 
     cfg = read_config_file()
     assert cfg["llm"]["api_key"] == "sk-from-ui"
+
+
+def test_同花顺key写入datasource节(monkeypatch, tmp_path):
+    """THS Key 属于 [datasource] 节，不与 [llm] 混放。"""
+    client = _client(monkeypatch, tmp_path)
+    resp = client.put("/api/config", json={"ths_api_key": "sk-fuyao-abcd1234"})
+    assert resp.status_code == 200
+
+    cfg = read_config_file()
+    assert cfg["datasource"]["ths_api_key"] == "sk-fuyao-abcd1234"
+    assert "ths_api_key" not in cfg.get("llm", {})
+
+
+def test_同花顺key留空不清空原key(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    client.put("/api/config", json={"ths_api_key": "sk-fuyao-keep"})
+    client.put("/api/config", json={"ths_api_key": ""})
+
+    cfg = read_config_file()
+    assert cfg["datasource"]["ths_api_key"] == "sk-fuyao-keep"
+
+
+def test_配置视图回显同花顺key状态(monkeypatch, tmp_path):
+    monkeypatch.setenv("NIULAI_API_KEY", "sk-x")
+    monkeypatch.setenv("NIULAI_THS_API_KEY", "sk-fuyao-wxyz9876")
+    client = _client(monkeypatch, tmp_path)
+
+    data = client.get("/api/config").json()
+    assert data["has_ths_key"] is True
+    assert "9876" in data["ths_key_hint"]  # 只回尾号
+
+    # env 优先级高于文件：文件里没配也不影响 env 命中
+    client.put("/api/config", json={"ths_api_key": "sk-fuyao-fromfile"})
+    data = client.get("/api/config").json()
+    assert data["has_ths_key"] is True
+    assert "9876" in data["ths_key_hint"]
 
 
 def test_非法协议返回422(monkeypatch, tmp_path):

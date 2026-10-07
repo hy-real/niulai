@@ -14,12 +14,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..datasource import PERIOD_LABEL, MarketDataService
+from ..datasource import MarketDataService
 from ..llm.types import ToolSpec
 
 QUOTE_TOOL_NAME = "stock_quote"
 KLINE_TOOL_NAME = "stock_kline"
 FINANCIAL_TOOL_NAME = "stock_financial"
+VALUATION_TOOL_NAME = "stock_valuation"
+ANOMALY_TOOL_NAME = "stock_anomaly"
 
 # 工具的能力声明。这一个是纯读 + 出网，不碰本地文件、不执行命令。
 _MARKET_CAPABILITIES = frozenset({"read", "network"})
@@ -175,6 +177,90 @@ class StockFinancialTool:
         return summary.render()
 
 
+_VALUATION_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "symbol": {
+            "type": "string",
+            "description": (
+                "标的标识，支持逗号分隔多个（如 600519,000858 或 茅台,五粮液）做对比。"
+                "可传 6 位代码或名称，服务端会做解析。"
+            ),
+        },
+    },
+    "required": ["symbol"],
+    "additionalProperties": False,
+}
+
+_ANOMALY_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "symbol": {
+            "type": "string",
+            "description": (
+                "标的标识，支持逗号分隔多个（如 600519,000858）。"
+                "可传 6 位代码或名称，服务端会做解析。"
+            ),
+        },
+    },
+    "required": ["symbol"],
+    "additionalProperties": False,
+}
+
+
+class StockValuationTool:
+    """查询单只或多只 A 股的估值快照。"""
+
+    capabilities = _MARKET_CAPABILITIES
+
+    def __init__(self, service: MarketDataService) -> None:
+        self._service = service
+        self.spec = ToolSpec(
+            name=VALUATION_TOOL_NAME,
+            description=(
+                "查询 A 股的**最新估值快照**：市盈率 PE（TTM / MRQ 两种口径）、"
+                "市净率 PB、市销率 PS、市现率 PCF。支持多标的一次对比。\n"
+                "适用：「茅台贵不贵」「XX 和 YY 谁便宜」「现在估值多少倍」。\n"
+                "不适用：实时价格（用 stock_quote）、历史走势（用 stock_kline）、"
+                "业绩本身（用 stock_financial）。\n"
+                "亏损公司 PE 为负或缺失属正常；不同行业的合理估值区间差异很大，"
+                "对比请在同行业内做。"
+            ),
+            parameters=_VALUATION_PARAMETERS,
+        )
+
+    async def run(self, args: dict[str, Any]) -> str:
+        symbol = str(args.get("symbol") or "").strip()
+        result = await self._service.valuation(symbol)
+        return result.render()
+
+
+class StockAnomalyTool:
+    """查询单只或多只 A 股的当日异动原因。"""
+
+    capabilities = _MARKET_CAPABILITIES
+
+    def __init__(self, service: MarketDataService) -> None:
+        self._service = service
+        self.spec = ToolSpec(
+            name=ANOMALY_TOOL_NAME,
+            description=(
+                "查询 A 股的**当日异动原因**：股价出现大涨 / 大跌 / 快速拉升 / "
+                "快速下挫等异动时，由数据方给出的解读文本与关键词。\n"
+                "适用：「XX 今天为什么大涨」「这票怎么突然跳水」「XX 异动的原因」。\n"
+                "不适用：没有异动的平静走势（会返回无记录）、涨停池全景"
+                "（用 market_limitup）、龙虎榜席位（用 market_dragontiger）。\n"
+                "仅当日有效；解读是数据方观点，供参考，不是因果结论。"
+            ),
+            parameters=_ANOMALY_PARAMETERS,
+        )
+
+    async def run(self, args: dict[str, Any]) -> str:
+        symbol = str(args.get("symbol") or "").strip()
+        result = await self._service.anomaly(symbol)
+        return result.render()
+
+
 def build_stock_tools(service: MarketDataService) -> list[Any]:
     """按数据源能力组装股票工具集。
 
@@ -190,6 +276,10 @@ def build_stock_tools(service: MarketDataService) -> list[Any]:
         tools.append(StockKlineTool(service))
     if service.sources_for("financial"):
         tools.append(StockFinancialTool(service))
+    if service.sources_for("valuation"):
+        tools.append(StockValuationTool(service))
+    if service.sources_for("anomaly"):
+        tools.append(StockAnomalyTool(service))
     return tools
 
 
@@ -203,11 +293,15 @@ def _as_int(value: Any, *, default: int, low: int, high: int) -> int:
 
 
 __all__ = [
+    "ANOMALY_TOOL_NAME",
     "FINANCIAL_TOOL_NAME",
     "KLINE_TOOL_NAME",
     "QUOTE_TOOL_NAME",
+    "VALUATION_TOOL_NAME",
+    "StockAnomalyTool",
     "StockFinancialTool",
     "StockKlineTool",
     "StockQuoteTool",
+    "StockValuationTool",
     "build_stock_tools",
 ]

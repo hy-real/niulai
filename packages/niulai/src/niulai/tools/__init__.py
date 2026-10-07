@@ -10,8 +10,11 @@
 | `stock_quote` | read + network | 实时行情快照 |
 | `stock_kline` | read + network | 历史 K 线 |
 | `stock_financial` | read + network | 定期报告主要指标 |
-| `market_sectors` | read + network | 概念 / 行业板块榜单 |
-| `sector_stocks` | read + network | 板块成分股列表 |
+| `stock_valuation` | read + network | 估值快照（PE / PB / PS / PCF） |
+| `stock_anomaly` | read + network | 当日异动原因 |
+| `market_hot` | read + network | 同花顺热股榜 / 飙升榜 |
+| `market_limitup` | read + network | 涨跌停 / 炸板池与连板天梯 |
+| `market_dragontiger` | read + network | 龙虎榜 |
 | `stock_moneyflow` | read + network | 个股每日资金流 |
 | `read_file` | read | 读回落盘的大结果 |
 
@@ -22,42 +25,54 @@
 from .base import MAX_RESULT_CHARS, READ_ONLY, Capability, Tool, ToolRegistry, ToolResult
 from .files import READ_FILE_TOOL_NAME, ReadFileTool
 from .market import (
+    DRAGON_TIGER_TOOL_NAME,
+    HOT_TOOL_NAME,
+    LIMITUP_TOOL_NAME,
     MONEYFLOW_TOOL_NAME,
-    SECTORS_TOOL_NAME,
-    SECTOR_STOCKS_TOOL_NAME,
-    MarketSectorsTool,
-    SectorStocksTool,
+    MarketDragonTigerTool,
+    MarketHotTool,
+    MarketLimitPoolTool,
     StockMoneyflowTool,
     build_market_tools,
 )
 from .stock import (
+    ANOMALY_TOOL_NAME,
     FINANCIAL_TOOL_NAME,
     KLINE_TOOL_NAME,
     QUOTE_TOOL_NAME,
+    VALUATION_TOOL_NAME,
+    StockAnomalyTool,
     StockFinancialTool,
     StockKlineTool,
     StockQuoteTool,
+    StockValuationTool,
     build_stock_tools,
 )
 
 __all__ = [
+    "ANOMALY_TOOL_NAME",
+    "DRAGON_TIGER_TOOL_NAME",
     "FINANCIAL_TOOL_NAME",
+    "HOT_TOOL_NAME",
     "KLINE_TOOL_NAME",
+    "LIMITUP_TOOL_NAME",
     "MAX_RESULT_CHARS",
     "MONEYFLOW_TOOL_NAME",
     "QUOTE_TOOL_NAME",
     "READ_FILE_TOOL_NAME",
     "READ_ONLY",
-    "SECTORS_TOOL_NAME",
-    "SECTOR_STOCKS_TOOL_NAME",
+    "VALUATION_TOOL_NAME",
     "Capability",
-    "MarketSectorsTool",
+    "MarketDragonTigerTool",
+    "MarketHotTool",
+    "MarketLimitPoolTool",
     "ReadFileTool",
-    "SectorStocksTool",
+    "StockAnomalyTool",
     "StockFinancialTool",
     "StockKlineTool",
     "StockMoneyflowTool",
     "StockQuoteTool",
+    "StockValuationTool",
     "Tool",
     "ToolRegistry",
     "ToolResult",
