@@ -39,6 +39,7 @@ from ..config import Settings
 from ..context import fit_context
 from ..events import EventEmitter, EventType
 from ..llm import LLMClient, LLMResponse, Message, Usage
+from ..llm.types import ToolCall
 from ..tools import ToolRegistry
 from .guard import ToolGuard
 from .prompt import load_prompt
@@ -58,6 +59,10 @@ INTERRUPTED_RESULT = (
     "[这次工具调用被中断了，结果未知。不要假定它成功或失败 —— "
     "如果这份数据仍然需要，请重新调用一次。]"
 )
+
+# 同一轮多个 tool_calls 的并发执行上限。数据源（东财）有限流，不能无脑并发；
+# 偶发 429 由数据源层的限流重试兜住，这里只负责"别自己打自己"。
+MAX_PARALLEL_TOOL_CALLS = 4
 
 
 @dataclass(slots=True)
@@ -250,14 +255,36 @@ class AgentRuntime:
         turn: int,
         guard: ToolGuard,
     ) -> None:
-        """逐个执行工具，并把结果回灌进 messages。
+        """执行这一轮声明的全部 tool_calls，并把结果回灌进 messages。
 
-        串行执行：多个工具同时打同一个数据源容易触发限流。
-        等 P3 后半加了限流与并发控制，再改成受控并发。
+        **检查串行、执行并行**：先按声明顺序逐个过熔断（guard 的状态是顺序
+        敏感的 —— 同一批里完全重复的调用，第二个就该被拦下），放行的调用经
+        信号量限流后并发执行（asyncio.gather）。
+
+        结果消息的回灌顺序只由**模型声明的顺序**决定，与完成先后无关：
+        TOOL_RESULT 事件随完成实时发出（前端按 tool_call_id 归位），
+        transcript 在全部落定后按声明顺序统一追加。
 
         **每个 tool_call 都必须回灌一条消息**，哪怕是拦下来的 ——
         assistant 已经声明了这些调用，少一条就是协议非法。
         """
+        semaphore = asyncio.Semaphore(MAX_PARALLEL_TOOL_CALLS)
+
+        async def _execute(call: ToolCall):
+            async with semaphore:
+                result = await self._tools.execute(
+                    call, timeout_s=self._settings.tool_timeout_s, run_id=emitter.run_id
+                )
+            # record 只改内存 dict、无 await，事件循环内天然原子，不会丢更新。
+            # 并行批内同工具"一败一成"时计数按完成顺序落 —— 并发下"连续"
+            # 本无全序，偏差方向只会偏保守（早拦一次），不会偏失控（见 guard.py）
+            guard.record(call, ok=result.ok)
+            _emit_tool_result(emitter, turn=turn, call=call, result=result)
+            return result
+
+        # 阶段一（串行）：声明顺序过熔断，放行的立刻起任务。
+        # 阶段一是纯同步循环（无 await），所以所有 TOOL_CALL 事件都先于执行发出。
+        plans: list[tuple[ToolCall, asyncio.Task | None, Message | None]] = []
         for call in response.tool_calls:
             emitter.emit(
                 EventType.TOOL_CALL, turn=turn, name=call.name, arguments=call.arguments,
@@ -275,22 +302,39 @@ class AgentRuntime:
                     message=breaker.message,
                     tool_call_id=call.id,
                 )
-                messages.append(
+                plans.append((
+                    call,
+                    None,
                     Message(
                         role="tool",
                         content=breaker.message,
                         tool_call_id=call.id,
                         name=call.name,
                         is_error=True,
-                    )
-                )
+                    ),
+                ))
                 continue
 
-            result = await self._tools.execute(
-                call, timeout_s=self._settings.tool_timeout_s, run_id=emitter.run_id
-            )
-            guard.record(call, ok=result.ok)
+            plans.append((call, asyncio.create_task(_execute(call)), None))
 
+        # 阶段二（并行）：等全部放行的调用落定。execute() 内部已把工具错误
+        # 转成 ok=False 的结果，能从这里冒出来的异常都是内部错误 —— 语义与
+        # 串行版一致（终止 run）。先等全部子任务结束再抛，不留孤儿任务。
+        running = [task for _, task, _ in plans if task is not None]
+        if running:
+            outcomes = await asyncio.gather(*running, return_exceptions=True)
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException) and not isinstance(
+                    outcome, asyncio.CancelledError
+                ):
+                    raise outcome
+
+        # 阶段三：按声明顺序回灌，协议合法且 transcript 可回放、可读
+        for call, task, blocked in plans:
+            if blocked is not None:
+                messages.append(blocked)
+                continue
+            result = task.result()
             messages.append(
                 Message(
                     role="tool",
@@ -299,35 +343,6 @@ class AgentRuntime:
                     name=call.name,
                     is_error=not result.ok,
                 )
-            )
-
-            artifact = result.meta.get("artifact")
-            if artifact:
-                # 完整内容已落盘，上下文里只有摘要 + 路径
-                emitter.emit(
-                    EventType.ARTIFACT,
-                    turn=turn,
-                    name=call.name,
-                    path=artifact,
-                    content_chars=result.meta.get("content_chars", 0),
-                )
-
-            emitter.emit(
-                EventType.TOOL_RESULT,
-                turn=turn,
-                name=call.name,
-                ok=result.ok,
-                # 进上下文的字符数。落盘时它远小于原始规模 —— 两者都要报，
-                # 否则看 trace 的人会以为"这个工具只返回了几百字符"。
-                content_chars=len(result.content),
-                original_chars=result.meta.get("content_chars", len(result.content)),
-                artifact=artifact,
-                preview=result.content[:RESULT_PREVIEW_CHARS],
-                # 恢复专用字段：journal 要能重建出协议合法的 transcript，
-                # 必须有完整结果原文和与 tool_call 对账的 id。
-                # SSE 帧会把 content 剔掉（webapi），前端只用 preview。
-                tool_call_id=call.id,
-                content=result.content,
             )
 
     async def _call_llm(
@@ -355,6 +370,38 @@ class AgentRuntime:
 
 
 # ---------------------------------------------------------------------- 辅助
+
+
+def _emit_tool_result(emitter: EventEmitter, *, turn: int, call: ToolCall, result) -> None:
+    """ARTIFACT + TOOL_RESULT 两个事件。
+
+    完整结果原文进 journal（恢复对账用）；SSE 帧会把 content 剔掉（webapi），
+    前端只用 preview。落盘时"进上下文的字符数"远小于原始规模 —— 两者都要报，
+    否则看 trace 的人会以为"这个工具只返回了几百字符"。
+    """
+    artifact = result.meta.get("artifact")
+    if artifact:
+        # 完整内容已落盘，上下文里只有摘要 + 路径
+        emitter.emit(
+            EventType.ARTIFACT,
+            turn=turn,
+            name=call.name,
+            path=artifact,
+            content_chars=result.meta.get("content_chars", 0),
+        )
+
+    emitter.emit(
+        EventType.TOOL_RESULT,
+        turn=turn,
+        name=call.name,
+        ok=result.ok,
+        content_chars=len(result.content),
+        original_chars=result.meta.get("content_chars", len(result.content)),
+        artifact=artifact,
+        preview=result.content[:RESULT_PREVIEW_CHARS],
+        tool_call_id=call.id,
+        content=result.content,
+    )
 
 
 def _ensure_system(messages: list[Message], system_prompt: str) -> None:

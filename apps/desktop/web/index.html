@@ -268,7 +268,8 @@ const composer = document.getElementById('composer');
 const mainEl = document.getElementById('main');
 const emptyEl = document.getElementById('empty');
 let sessionId = null, activeId = null;
-let bubble = null, lastCard = null;
+let bubble = null;
+const toolCards = new Map(); // tool_call_id -> 工具卡片（并行执行时按 id 归位结果）
 const busySet = new Set();   // 正在跑 run 的 sessionId（null = 尚未落库的新会话）
 const streams = new Map();   // sessionId -> { runId, aborter, buffer: [[事件名, 数据]] }
 
@@ -435,7 +436,7 @@ function openSession(id) {
   fetch('/api/sessions/' + encodeURIComponent(id)).then(r => r.json()).then(s => {
     activeId = id; sessionId = id;
     document.getElementById('sessTitle').textContent = s.title;
-    chat.innerHTML = ''; bubble = null; lastCard = null;
+    chat.innerHTML = ''; bubble = null; toolCards.clear();
     el('line', '▸ 会话：' + s.title);
     (s.messages || []).forEach(renderHistoryMessage);
     // 该会话若有进行中的流：重放缓冲的实时事件，接着继续实时接收
@@ -487,7 +488,7 @@ document.getElementById('resumeDismiss').addEventListener('click', () => {
 document.getElementById('newChat').addEventListener('click', () => {
   sessionId = null; activeId = null;
   document.getElementById('sessTitle').textContent = '新会话';
-  chat.innerHTML = ''; bubble = null; lastCard = null;
+  chat.innerHTML = ''; bubble = null; toolCards.clear();
   document.getElementById('resumebar').classList.remove('show');
   updateEmpty();   // 回到首页式布局：居中的 K 线 + 快捷提问 + 输入框
   loadSessions();
@@ -509,22 +510,24 @@ function handle(name, d) {
     bubble = null;  // 完整消息已由 text_delta 流出，这里只收尾
   } else if (name === 'tool_call') {
     bubble = null;
-    lastCard = el('tool');
+    const card = el('tool');
     const head = document.createElement('div'); head.className = 'head';
     head.textContent = '⚙ ' + d.name + '(' + d.arguments + ')';
-    lastCard.appendChild(head);
+    card.appendChild(head);
+    toolCards.set(d.tool_call_id, card);
   } else if (name === 'tool_result') {
-    if (lastCard) {
+    const card = toolCards.get(d.tool_call_id);
+    if (card) {
       const st = document.createElement('div'); st.className = d.ok ? 'ok' : 'err';
       let t = (d.ok ? '✓ ' : '✗ ') + d.name + ' 返回 ' + d.content_chars + ' 字符';
       if (d.original_chars && d.original_chars !== d.content_chars)
         t += '（原始 ' + d.original_chars.toLocaleString() + '，已落盘）';
-      st.textContent = t; lastCard.appendChild(st);
+      st.textContent = t; card.appendChild(st);
       if (d.preview) {
         const p = document.createElement('div'); p.className = 'prev';
-        p.textContent = d.preview.slice(0, 300); lastCard.appendChild(p);
+        p.textContent = d.preview.slice(0, 300); card.appendChild(p);
       }
-      lastCard = null;
+      toolCards.delete(d.tool_call_id);
     }
   } else if (name === 'circuit_break') {
     bubble = null; el('line warn', '⛔ 熔断：' + d.name + ' 已被拦下，未执行');
@@ -551,7 +554,7 @@ async function send() {
   if (!task || busySet.has(sessionId)) return;
   busySet.add(sessionId); refreshInputState();
   input.value = '';
-  bubble = null; lastCard = null;
+  bubble = null;
   const aborter = new AbortController();
   const entry = { runId: null, aborter, buffer: [] };
   let sid = sessionId;   // 流所属会话；新会话在首帧拿到真实 id 后归档

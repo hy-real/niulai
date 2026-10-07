@@ -477,6 +477,124 @@ async def test_同参数重复调用被拦下且不会真的执行第二次():
     assert breaks[0].data["reason"] == "duplicate_call"
 
 
+class _SlowQuoteTool:
+    """统计并发度的慢工具：两个调用若重叠执行，max_active 会 > 1（串行版做不到）。"""
+
+    spec = ToolSpec(
+        name="stock_quote",
+        description="查询行情",
+        parameters={
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    )
+
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+
+    async def run(self, args: dict) -> str:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0.05)
+        self.active -= 1
+        return f"结果 {args.get('symbol')}"
+
+
+async def test_同轮多个工具调用并发执行():
+    """模型一次声明多个独立调用时应并行跑：真重叠执行，且结果按声明顺序回灌。"""
+    tool = _SlowQuoteTool()
+    llm = _FakeLLM(
+        [
+            LLMResponse(
+                tool_calls=[_tool_call("c1", "600519"), _tool_call("c2", "000858")],
+                usage=Usage(1, 1, 2),
+            ),
+            LLMResponse(text="好了", usage=Usage(1, 1, 2)),
+        ]
+    )
+    emitter, events = _emitter()
+    runtime = AgentRuntime(settings=_settings(), llm=llm, tools=ToolRegistry([tool]))  # type: ignore[arg-type]
+
+    result = await runtime.run("两只票都查一下", emitter=emitter)
+
+    assert tool.max_active == 2  # 真并行，不是串行排队
+    tool_messages = [m for m in result.messages if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_messages] == ["c1", "c2"]  # 回灌顺序 = 声明顺序
+    assert tool_messages[0].content == "结果 600519"
+    assert tool_messages[1].content == "结果 000858"
+    # 结果事件随完成实时发出，完成顺序不保证；但两条都要有、且 id 对得上
+    result_events = [e for e in events if e.type is EventType.TOOL_RESULT]
+    assert {e.data["tool_call_id"] for e in result_events} == {"c1", "c2"}
+
+
+class _FlakyQuoteTool:
+    """第一次调用抛异常（如上游超时），之后正常 —— 用来验证"失败后的重试"。"""
+
+    spec = ToolSpec(
+        name="stock_quote",
+        description="查询行情",
+        parameters={
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    )
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, args: dict) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("upstream timeout")
+        return "最新价：1252.57"
+
+
+async def test_失败后的同参数重试不被duplicate拦下():
+    """工具失败（如超时）后，模型用同样参数重试是合法的 —— 放行与否该由
+    consecutive_failures 管，而不是 duplicate_call。否则一次瞬时故障就
+    永久堵死这条查询（行情查询没有可"改变参数"的维度）。"""
+    tool = _FlakyQuoteTool()
+    llm = _FakeLLM(
+        [
+            LLMResponse(tool_calls=[_tool_call()], usage=Usage(1, 1, 2)),
+            LLMResponse(tool_calls=[_tool_call()], usage=Usage(1, 1, 2)),  # 同参数重试
+            LLMResponse(text="茅台 1252.57 元", usage=Usage(1, 1, 2)),
+        ]
+    )
+    emitter, _ = _emitter()
+    runtime = AgentRuntime(settings=_settings(), llm=llm, tools=ToolRegistry([tool]))  # type: ignore[arg-type]
+
+    result = await runtime.run("茅台多少钱", emitter=emitter)
+
+    assert tool.calls == 2                       # 重试真的执行了
+    assert result.breaks == 0                    # 全程没有触发熔断
+    assert result.text == "茅台 1252.57 元"
+    assert result.stop_reason == "done"
+
+
+async def test_成功后的同参数重复调用仍被拦下():
+    """失败撤登记只放行"重试"；拿到数据后再要一次，依旧拦 —— 不给空转留门。"""
+    llm = _FakeLLM(
+        [
+            LLMResponse(tool_calls=[_tool_call()], usage=Usage(1, 1, 2)),
+            LLMResponse(tool_calls=[_tool_call()], usage=Usage(1, 1, 2)),  # 已成功过，重复要
+            LLMResponse(text="基于已有信息回答", usage=Usage(1, 1, 2)),
+        ]
+    )
+    emitter, events = _emitter()
+    runtime = AgentRuntime(settings=_settings(), llm=llm, tools=ToolRegistry([_QuoteTool()]))  # type: ignore[arg-type]
+
+    result = await runtime.run("茅台多少钱", emitter=emitter)
+
+    assert _QuoteTool.calls == [{"symbol": "600519"}]  # 只执行过一次
+    breaks = [e for e in events if e.type is EventType.CIRCUIT_BREAK]
+    assert len(breaks) == 1
+    assert result.breaks == 1
+
+
 async def test_熔断时仍然回灌一条tool消息():
     """assistant 声明了两个调用，就必须有两条结果 —— 少一条就是协议非法。"""
     llm = _FakeLLM(
