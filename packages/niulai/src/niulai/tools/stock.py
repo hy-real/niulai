@@ -16,6 +16,7 @@ from typing import Any
 
 from ..datasource import MarketDataService
 from ..llm.types import ToolSpec
+from .indicator import INDICATOR_TOOL_NAME, StockIndicatorTool
 
 QUOTE_TOOL_NAME = "stock_quote"
 KLINE_TOOL_NAME = "stock_kline"
@@ -129,7 +130,7 @@ class StockKlineTool:
                 "适用：涨跌幅趋势、区间高低点、均线所处位置、连续涨跌天数、"
                 "「最近一个月怎么样」「今年以来表现如何」。\n"
                 "不适用：当前价（用 stock_quote 更快更省）、财务指标（用 stock_financial）、"
-                "技术指标（MACD/KDJ 等本工具不计算，需要你自己从 K 线推）。\n"
+                "技术指标（用 stock_indicator，它算好了 MACD/KDJ/均线/量能）。\n"
                 "数据量可能较大：超过阈值时系统会把完整数据落盘，只给你摘要和路径，"
                 "这时用 read_file 分页读，不要把摘要当全部数据。"
             ),
@@ -274,6 +275,8 @@ def build_stock_tools(service: MarketDataService) -> list[Any]:
         tools.append(StockQuoteTool(service))
     if service.sources_for("kline"):
         tools.append(StockKlineTool(service))
+        # 指标由 K 线在本地确定性算出，不依赖新的数据源能力 —— 有 K 线就有它
+        tools.append(StockIndicatorTool(service))
     if service.sources_for("financial"):
         tools.append(StockFinancialTool(service))
     if service.sources_for("valuation"):
@@ -295,11 +298,13 @@ def _as_int(value: Any, *, default: int, low: int, high: int) -> int:
 __all__ = [
     "ANOMALY_TOOL_NAME",
     "FINANCIAL_TOOL_NAME",
+    "INDICATOR_TOOL_NAME",
     "KLINE_TOOL_NAME",
     "QUOTE_TOOL_NAME",
     "VALUATION_TOOL_NAME",
     "StockAnomalyTool",
     "StockFinancialTool",
+    "StockIndicatorTool",
     "StockKlineTool",
     "StockQuoteTool",
     "StockValuationTool",

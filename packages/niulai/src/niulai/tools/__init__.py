@@ -9,6 +9,7 @@
 | --- | --- | --- |
 | `stock_quote` | read + network | 实时行情快照 |
 | `stock_kline` | read + network | 历史 K 线 |
+| `stock_indicator` | read + network | 技术指标（MA / MACD / KDJ / RSI / 布林 / 量能） |
 | `stock_financial` | read + network | 定期报告主要指标 |
 | `stock_valuation` | read + network | 估值快照（PE / PB / PS / PCF） |
 | `stock_anomaly` | read + network | 当日异动原因 |
@@ -16,6 +17,9 @@
 | `market_limitup` | read + network | 涨跌停 / 炸板池与连板天梯 |
 | `market_dragontiger` | read + network | 龙虎榜 |
 | `stock_moneyflow` | read + network | 个股每日资金流 |
+| `stock_auction` | read + network | 集合竞价快照（竞价涨幅 / 量比） |
+| `market_auction_benchmark` | read + network | 短线风向标竞价基准 |
+| `market_index` | read + network | 指数 / 板块行情与 K 线 |
 | `read_file` | read | 读回落盘的大结果 |
 
 `read_file` 与前几个不同：它不碰网络，只读本程序自己落盘的 artifact。
@@ -24,14 +28,21 @@
 
 from .base import MAX_RESULT_CHARS, READ_ONLY, Capability, Tool, ToolRegistry, ToolResult
 from .files import READ_FILE_TOOL_NAME, ReadFileTool
+from .indicator import INDICATOR_TOOL_NAME, StockIndicatorTool
 from .market import (
+    AUCTION_TOOL_NAME,
+    BENCHMARK_TOOL_NAME,
     DRAGON_TIGER_TOOL_NAME,
     HOT_TOOL_NAME,
+    INDEX_TOOL_NAME,
     LIMITUP_TOOL_NAME,
     MONEYFLOW_TOOL_NAME,
+    MarketAuctionBenchmarkTool,
     MarketDragonTigerTool,
     MarketHotTool,
+    MarketIndexTool,
     MarketLimitPoolTool,
+    StockAuctionTool,
     StockMoneyflowTool,
     build_market_tools,
 )
@@ -51,9 +62,14 @@ from .stock import (
 
 __all__ = [
     "ANOMALY_TOOL_NAME",
+    "AUCTION_TOOL_NAME",
+    "BENCHMARK_TOOL_NAME",
     "DRAGON_TIGER_TOOL_NAME",
+    "HOT_TOOL_NAME",
+    "INDEX_TOOL_NAME",
     "FINANCIAL_TOOL_NAME",
     "HOT_TOOL_NAME",
+    "INDICATOR_TOOL_NAME",
     "KLINE_TOOL_NAME",
     "LIMITUP_TOOL_NAME",
     "MAX_RESULT_CHARS",
@@ -63,14 +79,18 @@ __all__ = [
     "READ_ONLY",
     "VALUATION_TOOL_NAME",
     "Capability",
+    "MarketAuctionBenchmarkTool",
     "MarketDragonTigerTool",
     "MarketHotTool",
+    "MarketIndexTool",
     "MarketLimitPoolTool",
     "ReadFileTool",
     "StockAnomalyTool",
     "StockFinancialTool",
+    "StockIndicatorTool",
     "StockKlineTool",
     "StockMoneyflowTool",
+    "StockAuctionTool",
     "StockQuoteTool",
     "StockValuationTool",
     "Tool",

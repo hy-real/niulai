@@ -615,3 +615,114 @@ async def test_异动按逗号分隔多标的解析():
     result = await _ths(handler).anomaly("600519, 茅台")  # 名称 + 代码混合，去重后只剩一个
     assert captured["thscodes"] == "600519.SH"
     assert result.rows[0].name == "贵州茅台"
+
+
+# ------------------------------------------------------------------ 集合竞价 / 指数
+
+AUCTION_ITEM = {
+    "thscode": "600519.SH",
+    "ticker": "600519",
+    "name": "贵州茅台",
+    "auction_price": 1421.0,
+    "auction_pct": 0.35,
+    "auction_volume": 1_260_000,  # 股
+    "auction_amount": 17_904_600,
+    "auction_unmatched": 80_000,
+    "auction_turnover_pct": 0.01,
+    "auction_yesterday_ratio_pct": 82.4,
+    "auction_volume_ratio": 1.12,
+    "pre_close_price": 1416.04,
+    "open_price": 1421.0,
+    "last_price": 1421.0,
+    "float_market_cap": 1.785e12,
+}
+
+
+async def test_竞价快照_代码直传_单位换算():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "auction/snapshot" in str(request.url):
+            return _envelope({
+                "timestamp": 1, "auction_phase": "final", "data_status": "ready",
+                "total": 1, "item": [AUCTION_ITEM],
+            })
+        raise AssertionError(f"意外路径：{request.url}")
+
+    snap = await _ths(handler).auction("600519")
+    assert snap.phase == "final"
+    row = snap.rows[0]
+    assert row.code == "600519" and row.auction_pct == 0.35
+    assert row.auction_volume == 12_600  # 股 → 手
+    assert row.unmatched == 800
+    text = snap.render()
+    assert "集合竞价快照" in text and "竞价量比" in text and "1.12" in text
+
+
+async def test_竞价快照_空结果_如实报错():
+    source = _ths(_route({"auction/snapshot": _envelope({"item": []})}))
+    with pytest.raises(DataSourceError):
+        await source.auction("600519")
+
+
+async def test_短线风向标_带日期与标签():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "short-term-benchmark" in str(request.url):
+            assert dict(request.url.params)["date"] == "2026-10-09"
+            return _envelope({
+                "timestamp": 1, "date": "2026-10-09", "date_ms": 1,
+                "item": [{
+                    "thscode": "600519.SH", "ticker": "600519", "name": "贵州茅台",
+                    "auction_pct": 0.35, "tags": ["高开", "放量"],
+                }],
+            })
+        raise AssertionError(f"意外路径：{request.url}")
+
+    benchmark = await _ths(handler).auction_benchmark(date="2026-10-09")
+    assert benchmark.date == "2026-10-09"
+    assert benchmark.rows[0].tags == ["高开", "放量"]
+    assert "短线风向标" in benchmark.render()
+
+
+async def test_指数快照_别名解析与名称映射():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "a-share-index/prices/snapshot" in str(request.url):
+            assert dict(request.url.params)["thscodes"] == "000001.SH"
+            return _envelope({"item": [{
+                "thscode": "000001.SH", "ticker": "000001",
+                "last_price": 3500.5, "price_change": 12.3,
+                "price_change_ratio_pct": 0.35, "open_price": 3490,
+                "high_price": 3510, "low_price": 3480, "prev_price": 3488.2,
+                "volume": 25_000_000_000, "turnover": 3.2e11,
+            }]})
+        raise AssertionError(f"意外路径：{request.url}")
+
+    quotes = await _ths(handler).index_quote("上证指数")
+    assert quotes[0].name == "上证指数"  # 指数快照无名称字段，来自内置映射
+    assert quotes[0].change_pct == 0.35
+    assert quotes[0].volume == 250_000_000  # 股 → 手
+
+
+async def test_指数代码_不识别时报错带指引而不是去检索():
+    source = _ths(_route({}))  # 不该发出任何请求
+    with pytest.raises(DataSourceError):
+        await source.index_quote("半导体")  # 板块名录未内置，必须传 88xxxx.TI
+
+
+async def test_指数K线_日线无复权():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "a-share-index/prices/historical" in str(request.url):
+            params = dict(request.url.params)
+            assert params["interval"] == "1d"
+            assert params["thscode"] == "000001.SH"
+            assert "adjust" not in params  # 指数无复权语义
+            return _envelope({"item": [
+                {"date_ms": _ms(2026, 10, 8), "open_price": 3490, "high_price": 3510,
+                 "low_price": 3480, "close_price": 3500.0, "volume": 2.4e10, "turnover": 3.1e11},
+                {"date_ms": _ms(2026, 10, 9), "open_price": 3495, "high_price": 3520,
+                 "low_price": 3485, "close_price": 3500.5, "volume": 2.5e10, "turnover": 3.2e11},
+            ]})
+        raise AssertionError(f"意外路径：{request.url}")
+
+    series = await _ths(handler).index_kline("000001.SH", limit=60)
+    assert series.period == "daily" and series.adjust == "none"
+    assert len(series.bars) == 2
+    assert series.bars[-1].change_pct == pytest.approx(0.5 / 3500.0 * 100, rel=1e-3)

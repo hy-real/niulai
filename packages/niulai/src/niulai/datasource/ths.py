@@ -34,6 +34,10 @@ from ..logs import get_logger
 from .base import (
     AnomalyList,
     AnomalyRow,
+    AuctionBenchmark,
+    AuctionRow,
+    AuctionSnapshot,
+    BenchmarkRow,
     DragonTigerBoard,
     DragonTigerRow,
     FinancialPeriod,
@@ -71,6 +75,10 @@ LIMIT_POOL_URLS = {
 LADDER_URL = f"{BASE_URL}/api/a-share/special-data/limit-up-ladder"
 DRAGON_TIGER_URL = f"{BASE_URL}/api/a-share/special-data/dragon-tiger-list"
 ANOMALY_STOCK_URL = f"{BASE_URL}/api/a-share/special-data/anomaly-analysis-stock"
+AUCTION_URL = f"{BASE_URL}/api/a-share/auction/snapshot"
+BENCHMARK_URL = f"{BASE_URL}/api/a-share/auction/short-term-benchmark"
+INDEX_SNAPSHOT_URL = f"{BASE_URL}/api/a-share-index/prices/snapshot"
+INDEX_HISTORICAL_URL = f"{BASE_URL}/api/a-share-index/prices/historical"
 
 DEFAULT_ATTEMPTS = 3
 # 4xx 里只有 429 值得重试；其余是请求本身有问题，重试没有意义
@@ -80,12 +88,43 @@ _RETRYABLE_STATUS = {408, 425, 429}
 _RETRYABLE_CODES = {4001, 5001, 5002, 5003}
 
 _THS_CODE_RE = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
+# 指数 / 板块代码：000001.SH / 399001.SZ / 886042.TI（同花顺板块）
+_INDEX_CODE_RE = re.compile(r"^\d{6}\.(SH|SZ|BJ|TI)$")
+
+# 指数快照不返回名称，检索接口也不覆盖指数 —— 常用指数用内置映射，
+# 板块（88xxxx.TI）没有名录，名称位置显示代码本身。
+_INDEX_NAMES: dict[str, str] = {
+    "000001.SH": "上证指数",
+    "399001.SZ": "深证成指",
+    "399006.SZ": "创业板指",
+    "000688.SH": "科创50",
+    "000300.SH": "沪深300",
+    "000905.SH": "中证500",
+    "000852.SH": "中证1000",
+    "899050.BJ": "北证50",
+    "399303.SZ": "国证2000",
+}
+_INDEX_ALIASES: dict[str, str] = {
+    "上证指数": "000001.SH",
+    "上证": "000001.SH",
+    "大盘": "000001.SH",
+    "深证成指": "399001.SZ",
+    "创业板指": "399006.SZ",
+    "创业板": "399006.SZ",
+    "科创50": "000688.SH",
+    "沪深300": "000300.SH",
+    "中证500": "000905.SH",
+    "中证1000": "000852.SH",
+    "北证50": "899050.BJ",
+}
 
 # K 线服务端仅支持日线。按周期放大取数窗口（自然日），聚合在本层做：
 # 日线 ~2.1 自然日/根；周线 ~10.5；月线 ~45（留了节假日的余量）
 _PERIOD_DAY_FACTOR = {"daily": 2.1, "weekly": 10.5, "monthly": 45.0}
 # 服务端窗口硬上限 10 年（≈3653 天），留安全边际
 _MAX_WINDOW_DAYS = 3580
+# 指数 K 线服务端只给近 5 年
+_MAX_INDEX_WINDOW_DAYS = 1825
 
 _TZ_CN = dt.timezone(dt.timedelta(hours=8))
 
@@ -100,6 +139,7 @@ class ThsDataSource:
     capabilities: set[str] = {
         "quote", "kline", "financial",
         "valuation", "hotlist", "limitup", "dragontiger", "anomaly",
+        "auction", "index_quote", "index_kline",
     }
 
     def __init__(
@@ -348,6 +388,103 @@ class ThsDataSource:
             as_of=_now(),
         )
 
+    # ------------------------------------------------------- 集合竞价 / 指数
+
+    async def auction(self, symbol: str) -> AuctionSnapshot:
+        """集合竞价快照，`symbol` 支持逗号分隔多个（服务端上限 100，这里限 50）。"""
+        thscodes = await self._resolve_many(symbol, max_tokens=50)
+        payload = await self._get_json(
+            AUCTION_URL,
+            {"thscodes": ",".join(thscodes)},
+            what="集合竞价",
+        )
+        data = payload.get("data") or {}
+        items = data.get("item") or []
+        if not items:
+            raise DataSourceError(
+                "ths 没有返回集合竞价数据（非交易日或标的代码不存在）"
+            )
+        return AuctionSnapshot(
+            phase=str(data.get("auction_phase") or ""),
+            rows=[parse_auction_row(it) for it in items],
+            source="ths",
+            as_of=_now(),
+        )
+
+    async def auction_benchmark(self, *, date: str | None = None) -> AuctionBenchmark:
+        """短线风向标竞价基准。`date` 格式 yyyy-MM-dd，省略取当日。"""
+        params: dict[str, str] = {}
+        if date:
+            params["date"] = date
+        payload = await self._get_json(BENCHMARK_URL, params, what="短线风向标")
+        data = payload.get("data") or {}
+        return AuctionBenchmark(
+            date=str(data.get("date") or ""),
+            rows=[parse_benchmark_row(it) for it in data.get("item") or []],
+            source="ths",
+            as_of=_now(),
+        )
+
+    async def index_quote(self, symbols: str) -> list[Quote]:
+        """指数 / 板块行情快照，`symbols` 支持逗号分隔多个（如 000001.SH,886042.TI）。"""
+        thscodes = [self._to_index_code(token) for token in _split_symbols(symbols)]
+        payload = await self._get_json(
+            INDEX_SNAPSHOT_URL,
+            {"thscodes": ",".join(thscodes)},
+            what="指数行情",
+        )
+        items = (payload.get("data") or {}).get("item") or []
+        if not items:
+            raise DataSourceError("ths 没有返回指数行情（代码可能不存在）")
+        return [parse_index_quote(it) for it in items]
+
+    async def index_kline(self, symbol: str, *, limit: int = 60) -> KlineSeries:
+        """指数 / 板块历史 K 线。服务端仅日线、近 5 年，无复权语义。"""
+        thscode = self._to_index_code(symbol)
+        limit = max(1, min(limit, 500))
+        days = min(int(limit * _PERIOD_DAY_FACTOR["daily"]) + 10, _MAX_INDEX_WINDOW_DAYS)
+        end_ms = _now_ms()
+        start_ms = end_ms - days * 86_400_000
+
+        payload = await self._get_json(
+            INDEX_HISTORICAL_URL,
+            {
+                "thscode": thscode,
+                "interval": "1d",
+                "start": str(start_ms),
+                "end": str(end_ms),
+            },
+            what="指数 K 线",
+        )
+        items = (payload.get("data") or {}).get("item") or []
+        if not items:
+            raise DataSourceError(f"ths 没有返回「{thscode}」的指数 K 线")
+        bars = [bar for item in items if (bar := parse_bar(item)) is not None]
+        bars = bars[-limit:]
+        _fill_change_pct(bars)
+        return KlineSeries(
+            symbol=thscode,
+            name=_INDEX_NAMES.get(thscode, thscode),
+            period="daily",
+            adjust="none",
+            bars=bars,
+            source="ths",
+            as_of=_now(),
+        )
+
+    def _to_index_code(self, symbol: str) -> str:
+        """「上证指数」/ '000001.SH' / '886042.TI' → 标准 thscode。"""
+        raw = symbol.strip().upper()
+        alias = _INDEX_ALIASES.get(raw) or _INDEX_ALIASES.get(symbol.strip())
+        if alias:
+            return alias
+        if _INDEX_CODE_RE.match(raw):
+            return raw
+        raise DataSourceError(
+            f"「{symbol}」不是可识别的指数代码。常用指数可用名称（上证指数 / 创业板指 /"
+            " 沪深300 等），板块请传同花顺板块代码（如 886042.TI）。"
+        )
+
     # ------------------------------------------------------------------ 内部
 
     async def _resolve_many(self, symbol: str, *, max_tokens: int) -> list[str]:
@@ -475,6 +612,54 @@ def parse_valuation(item: dict[str, Any]) -> ValuationRow:
         pb_mrq=_num(item.get("pb_mrq")),
         ps_ttm=_num(item.get("ps_ttm")),
         pcf_ttm=_num(item.get("pcf_ttm")),
+    )
+
+
+def parse_auction_row(item: dict[str, Any]) -> AuctionRow:
+    """集合竞价单条 → `AuctionRow`。成交量股 → 手，金额保持元。"""
+    return AuctionRow(
+        code=str(item.get("ticker") or item.get("thscode") or "").split(".")[0],
+        name=str(item.get("name") or ""),
+        auction_price=_num(item.get("auction_price")),
+        auction_pct=_num(item.get("auction_pct")),
+        auction_volume=_shares_to_lots(item.get("auction_volume")),
+        auction_amount=_num(item.get("auction_amount")),
+        unmatched=_shares_to_lots(item.get("auction_unmatched")),
+        turnover_pct=_num(item.get("auction_turnover_pct")),
+        yesterday_ratio_pct=_num(item.get("auction_yesterday_ratio_pct")),
+        volume_ratio=_num(item.get("auction_volume_ratio")),
+        pre_close=_num(item.get("pre_close_price")),
+        open_price=_num(item.get("open_price")),
+    )
+
+
+def parse_benchmark_row(item: dict[str, Any]) -> BenchmarkRow:
+    """风向标单条 → `BenchmarkRow`。"""
+    return BenchmarkRow(
+        code=str(item.get("ticker") or item.get("thscode") or "").split(".")[0],
+        name=str(item.get("name") or ""),
+        auction_pct=_num(item.get("auction_pct")),
+        tags=[str(t) for t in item.get("tags") or []],
+    )
+
+
+def parse_index_quote(item: dict[str, Any]) -> Quote:
+    """指数快照单条 → `Quote`。指数无名称字段，用内置映射，查不到就显示代码。"""
+    thscode = str(item.get("thscode") or item.get("ticker") or "")
+    return Quote(
+        symbol=thscode,
+        name=_INDEX_NAMES.get(thscode, thscode),
+        price=_num(item.get("last_price")) or 0.0,
+        prev_close=_num(item.get("prev_price")),
+        open=_num(item.get("open_price")),
+        high=_num(item.get("high_price")),
+        low=_num(item.get("low_price")),
+        change=_num(item.get("price_change")),
+        change_pct=_num(item.get("price_change_ratio_pct")),
+        volume=_shares_to_lots(item.get("volume")),
+        amount=_num(item.get("turnover")),
+        source="ths",
+        as_of=_now(),
     )
 
 
@@ -656,6 +841,14 @@ def _try_to_thscode(symbol: str) -> str | None:
     if raw.isdigit() and len(raw) == 6:
         return f"{raw}.{_guess_suffix(raw)}"
     return None
+
+
+def _split_symbols(symbol: str) -> list[str]:
+    """逗号分隔（中英文逗号都认）的标的列表 → 非空 token 列表。"""
+    tokens = [t.strip() for t in symbol.replace("，", ",").split(",") if t.strip()]
+    if not tokens:
+        raise DataSourceError("股票代码或名称为空")
+    return tokens
 
 
 def _guess_suffix(code: str) -> str:

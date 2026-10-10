@@ -26,9 +26,13 @@ from ..errors import DataSourceError
 #   limitup     涨跌停 / 炸板股票池与连板天梯 —— 盘面情绪
 #   dragontiger 龙虎榜（全部 / 机构榜 / 游资榜）
 #   anomaly     个股异动原因（当日）
+#   auction     集合竞价（个股竞价快照 / 短线风向标竞价基准）—— 开盘技术信号
+#   index_quote 指数 / 板块行情快照（大盘与行业参照系）
+#   index_kline 指数 / 板块历史 K 线（个股 vs 板块的走势对比）
 Capability = Literal[
     "quote", "kline", "financial", "moneyflow",
     "valuation", "hotlist", "limitup", "dragontiger", "anomaly",
+    "auction", "index_quote", "index_kline",
 ]
 
 
@@ -517,6 +521,95 @@ class AnomalyList:
             keywords = f"　关键词：{'、'.join(r.keywords)}" if r.keywords else ""
             lines.append(f"◆ {r.name}（{r.code}）[{r.tag}]{keywords}")
             lines.append(f"  {r.content}")
+        lines.append(f"数据源：{self.source}　数据时间：{self.as_of}")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------- 集合竞价
+
+
+@dataclass(slots=True)
+class AuctionRow:
+    """一只标的的集合竞价快照。竞价量比 / 昨量比是开盘技术信号的核心。"""
+
+    code: str
+    name: str
+    auction_price: float | None = None
+    auction_pct: float | None = None  # 竞价涨跌幅 %
+    auction_volume: float | None = None  # 手
+    auction_amount: float | None = None  # 元
+    unmatched: float | None = None  # 未匹配量（手）
+    turnover_pct: float | None = None  # 竞价换手率 %
+    yesterday_ratio_pct: float | None = None  # 竞价量 / 昨日总量的 %
+    volume_ratio: float | None = None  # 竞价量比
+    pre_close: float | None = None
+    open_price: float | None = None
+
+
+@dataclass(slots=True)
+class AuctionSnapshot:
+    phase: str = ""  # 集合竞价阶段（final / live …）
+    rows: list[AuctionRow] = field(default_factory=list)
+    source: str = ""
+    as_of: str = ""
+
+    def render(self) -> str:
+        if not self.rows:
+            return "没有取到集合竞价数据。"
+        phase = f"，阶段：{self.phase}" if self.phase else ""
+        lines = [
+            f"集合竞价快照（共 {len(self.rows)} 只{phase}）",
+            "字段：名称(代码), 竞价价, 竞价涨幅(%), 竞价量比, 竞价量/昨日量(%), "
+            "竞价额(亿), 未匹配(手), 开盘, 前收",
+        ]
+        for r in self.rows:
+            amount = "—" if r.auction_amount is None else f"{r.auction_amount / 1e8:.2f}"
+            lines.append(
+                f"{r.name}({r.code}), {_money(r.auction_price)}, {_pct(r.auction_pct)}, "
+                f"{_money(r.volume_ratio)}, {_money(r.yesterday_ratio_pct)}, "
+                f"{amount}, "
+                f"{'—' if r.unmatched is None else f'{r.unmatched:,.0f}'}, "
+                f"{_money(r.open_price)}, {_money(r.pre_close)}"
+            )
+        lines.append(
+            "注：竞价量比 > 1 表示竞价成交量高于近期水平；高开 + 放量竞价是偏强信号，"
+            "低开缩量偏弱。竞价数据只在交易日 9:15–9:25 产生，其他时间查到的是当日终态。"
+        )
+        lines.append(f"数据源：{self.source}　数据时间：{self.as_of}")
+        return "\n".join(lines)
+
+
+@dataclass(slots=True)
+class BenchmarkRow:
+    """短线风向标一行。tags 是数据方给的竞价标签（高开 / 放量 …）。"""
+
+    code: str
+    name: str
+    auction_pct: float | None = None
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class AuctionBenchmark:
+    date: str = ""
+    rows: list[BenchmarkRow] = field(default_factory=list)
+    source: str = ""
+    as_of: str = ""
+
+    def render(self) -> str:
+        if not self.rows:
+            return f"{self.date or '当日'}没有取到短线风向标竞价数据（非交易日或接口无数据）。"
+        lines = [
+            f"短线风向标竞价基准（{self.date}，共 {len(self.rows)} 只）",
+            "字段：名称(代码), 竞价涨幅(%), 标签",
+        ]
+        for r in self.rows:
+            tags = "、".join(r.tags) if r.tags else "—"
+            lines.append(f"{r.name}({r.code}), {_pct(r.auction_pct)}, {tags}")
+        lines.append(
+            "注：风向标是市场短线情绪的参照股集合（多为前期涨停 / 人气股），"
+            "它们的集体竞价表现常被用来判断当日情绪强弱：整体高开放量 = 情绪偏强。"
+        )
         lines.append(f"数据源：{self.source}　数据时间：{self.as_of}")
         return "\n".join(lines)
 

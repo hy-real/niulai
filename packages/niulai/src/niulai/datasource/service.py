@@ -16,6 +16,8 @@ from ..errors import DataSourceError
 from ..logs import get_logger
 from .base import (
     AnomalyList,
+    AuctionBenchmark,
+    AuctionSnapshot,
     Capability,
     DragonTigerBoard,
     FinancialSummary,
@@ -110,6 +112,22 @@ class MarketDataService:
         """个股资金流：主力 / 超大单 / 大单 / 中单 / 小单，最近 days 个交易日。"""
         return await self._route("moneyflow", "moneyflow", symbol, days=days)
 
+    async def auction(self, symbol: str) -> AuctionSnapshot:
+        """集合竞价快照：竞价价 / 竞价涨幅 / 竞价量比等，`symbol` 支持逗号分隔多个。"""
+        return await self._route("auction", "auction", symbol)
+
+    async def auction_benchmark(self, *, date: str | None = None) -> AuctionBenchmark:
+        """短线风向标竞价基准：参照股集合的当日竞价表现与标签。"""
+        return await self._route("auction", "auction_benchmark", date=date)
+
+    async def index_quote(self, symbols: str) -> list[Quote]:
+        """指数 / 板块行情快照，`symbols` 支持逗号分隔多个（000001.SH / 886042.TI）。"""
+        return await self._route("index_quote", "index_quote", symbols)
+
+    async def index_kline(self, symbol: str, *, limit: int = 60) -> KlineSeries:
+        """指数 / 板块历史 K 线（日线，单只）。"""
+        return await self._route("index_kline", "index_kline", symbol, limit=limit)
+
     async def aclose(self) -> None:
         for source in self._sources:
             close = getattr(source, "aclose", None)
@@ -147,7 +165,8 @@ def build_default_service(ths_api_key: str | None = None) -> MarketDataService:
     """同花顺官方 API 主源，东财 / 腾讯兜底。
 
     路由顺序即兜底顺序（THS 在最前）：
-    - quote / kline / financial / valuation / hotlist / limitup / dragontiger / anomaly：ths；
+    - quote / kline / financial / valuation / hotlist / limitup / dragontiger /
+      anomaly / auction / index_quote / index_kline：ths；
     - moneyflow：THS 的资金流是端内专用接口调不了，由东财提供；
     - quote / kline / financial 的兜底：ths 失败 → 东财 → 腾讯。
 
