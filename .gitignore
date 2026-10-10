@@ -40,3 +40,6 @@ apps/desktop/dist/
 .workbuddy/
 .codebuddy/
 .tmp*/
+
+# 本地文档（只在本地保留，不上传远端）
+docs/
