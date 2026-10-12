@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 
 import pytest
@@ -15,6 +16,7 @@ from niulai.agent import AgentRuntime
 from niulai.config import Settings
 from niulai.events import EventEmitter, EventType
 from niulai.llm import LLMResponse, Message, ToolCall, ToolSpec, Usage
+from niulai.permissions import Approval
 from niulai.tools import ToolRegistry
 
 
@@ -332,7 +334,9 @@ async def test_历史里没有system时自动补上():
 
     sent = llm.seen_messages[0]
     assert sent[0].role == "system"
-    assert sent[0].content == "你是测试用的系统提示"
+    # 正式 prompt 在前，运行时上下文（会话 id / 输出目录）附在后面
+    assert sent[0].content.startswith("你是测试用的系统提示")
+    assert "运行时上下文" in sent[0].content
     assert [m.content for m in sent if m.role == "user"] == ["上一句", "你好"]
 
 
@@ -350,7 +354,8 @@ async def test_system每次都用最新的那份():
     stale = [Message(role="system", content="旧版本提示"), Message(role="user", content="上一句")]
     await runtime.run("你好", emitter=emitter, messages=stale)
 
-    assert llm.seen_messages[0][0].content == "新版本提示"
+    assert llm.seen_messages[0][0].content.startswith("新版本提示")
+    assert "旧版本提示" not in llm.seen_messages[0][0].content
 
 
 async def test_runresult带回完整transcript():
@@ -724,3 +729,163 @@ async def test_落盘结果的tool_result事件带artifact路径(tmp_path):
     # 看 trace 的人会以为这个工具只返回了几百字符。
     assert tool_result.data["content_chars"] < 1000
     assert tool_result.data["original_chars"] > 5000
+
+
+# --------------------------------------------------------------------------
+# 权限审批：写类工具过闸，只读过站
+# --------------------------------------------------------------------------
+
+
+class _WriteTool:
+    """假 write_file：声明 write_local，记录调用，可编排失败。"""
+
+    spec = ToolSpec(
+        name="write_file",
+        description="写文件",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["path", "content"],
+        },
+    )
+    capabilities = frozenset({"write_local"})
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def run(self, args: dict) -> str:
+        self.calls.append(args)
+        return "已写入"
+
+
+class _DenyChannel:
+    def __init__(self) -> None:
+        self.seen: list = []
+
+    async def request(self, req):
+        self.seen.append(req)
+        return Approval(granted=False)
+
+
+class _GrantChannel:
+    def __init__(self) -> None:
+        self.seen: list = []
+
+    async def request(self, req):
+        self.seen.append(req)
+        return Approval(granted=True)
+
+
+def _write_llm(path: str) -> _FakeLLM:
+    arguments = json.dumps({"path": path, "content": "x"}, ensure_ascii=False)
+    return _FakeLLM(
+        [
+            LLMResponse(
+                tool_calls=[ToolCall(id="c1", name="write_file", arguments=arguments)],
+                usage=Usage(1, 1, 2),
+            ),
+            LLMResponse(text="写好了", usage=Usage(1, 1, 2)),
+        ]
+    )
+
+
+async def test_会话目录内的新文件不问直接写(monkeypatch, tmp_path):
+    """报告落地的主路径：会话目录 + 新文件 = 允许，不弹审批。"""
+    monkeypatch.setenv("NIULAI_HOME", str(tmp_path))
+    tool = _WriteTool()
+    channel = _DenyChannel()  # 若被问一定会拒 —— 用来证明"没被问"
+    emitter, events = _emitter()
+    llm = _write_llm("sessions/sess-1/茅台-分析.md")
+    runtime = AgentRuntime(
+        settings=_settings(),  # type: ignore[arg-type]
+        llm=llm,
+        tools=ToolRegistry([tool]),  # type: ignore[arg-type]
+        approval_channel=channel,
+    )
+
+    await runtime.run("存个报告", emitter=emitter, session_id="sess-1")
+
+    assert tool.calls == [
+        {"path": "sessions/sess-1/茅台-分析.md", "content": "x"}
+    ]
+    assert channel.seen == []
+    assert not [e for e in events if e.type is EventType.PERMISSION_REQUEST]
+
+
+async def test_写到会话目录之外被拒时不执行且回灌可恢复消息(monkeypatch, tmp_path):
+    monkeypatch.setenv("NIULAI_HOME", str(tmp_path))
+    tool = _WriteTool()
+    emitter, events = _emitter()
+    llm = _write_llm("config.toml")
+    runtime = AgentRuntime(
+        settings=_settings(),  # type: ignore[arg-type]
+        llm=llm,
+        tools=ToolRegistry([tool]),  # type: ignore[arg-type]
+        approval_channel=_DenyChannel(),
+    )
+
+    await runtime.run("改配置", emitter=emitter, session_id="sess-1")
+
+    assert tool.calls == []  # 没执行
+    tool_messages = [m for m in llm.seen_messages[1] if m.role == "tool"]
+    assert tool_messages[0].is_error is True
+    assert "用户拒绝" in tool_messages[0].content
+    assert "不要再尝试" in tool_messages[0].content
+
+
+async def test_审批通过后才执行(monkeypatch, tmp_path):
+    monkeypatch.setenv("NIULAI_HOME", str(tmp_path))
+    tool = _WriteTool()
+    channel = _GrantChannel()
+    emitter, events = _emitter()
+    llm = _write_llm("其他目录/a.md")
+    runtime = AgentRuntime(
+        settings=_settings(),  # type: ignore[arg-type]
+        llm=llm,
+        tools=ToolRegistry([tool]),  # type: ignore[arg-type]
+        approval_channel=channel,
+    )
+
+    await runtime.run("写到别处", emitter=emitter, session_id="sess-1")
+
+    assert len(channel.seen) == 1
+    assert channel.seen[0].reason == "outside_scope"
+    assert tool.calls == [{"path": "其他目录/a.md", "content": "x"}]
+    decisions = [e for e in events if e.type is EventType.PERMISSION_DECISION]
+    assert decisions[0].data["granted"] is True
+
+
+async def test_无审批通道时写操作按拒绝处理(monkeypatch, tmp_path):
+    """--json / 无人值守：没人能回答 y/n，fail-safe 拒绝。"""
+    monkeypatch.setenv("NIULAI_HOME", str(tmp_path))
+    tool = _WriteTool()
+    emitter, _ = _emitter()
+    llm = _write_llm("config.toml")
+    runtime = AgentRuntime(
+        settings=_settings(),  # type: ignore[arg-type]
+        llm=llm,
+        tools=ToolRegistry([tool]),  # type: ignore[arg-type]
+    )
+
+    await runtime.run("改配置", emitter=emitter, session_id="sess-1")
+
+    assert tool.calls == []
+    blocked = [m for m in llm.seen_messages[1] if m.role == "tool"][0]
+    assert "没有可用的审批通道" in blocked.content
+
+
+async def test_系统提示注入当前会话输出目录(monkeypatch, tmp_path):
+    """输出目录由系统给出、不让模型猜 —— 猜错 = 白弹一次审批。"""
+    monkeypatch.setenv("NIULAI_HOME", str(tmp_path))
+    llm = _FakeLLM([LLMResponse(text="好", usage=Usage(1, 1, 2))])
+    emitter, _ = _emitter()
+    runtime = AgentRuntime(settings=_settings(), llm=llm, tools=ToolRegistry([]))  # type: ignore[arg-type]
+
+    await runtime.run("你好", emitter=emitter, session_id="sess-1")
+
+    system = llm.seen_messages[0][0]
+    assert "sessions/sess-1/" in system.content
+    assert "write_file" in system.content

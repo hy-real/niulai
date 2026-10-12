@@ -21,9 +21,12 @@
 | `market_auction_benchmark` | read + network | 短线风向标竞价基准 |
 | `market_index` | read + network | 指数 / 板块行情与 K 线 |
 | `read_file` | read | 读回落盘的大结果 |
+| `write_file` | write_local | 写报告 / 产出到当前会话目录（越权与覆盖先问用户） |
 
 `read_file` 与前几个不同：它不碰网络，只读本程序自己落盘的 artifact。
-这是"工具声明能力"的第一个真实用例 —— 能力不同，将来策略层的判定也该不同。
+`write_file` 是第一个声明 `write_local` 的工具 —— 能力不同，策略层的判定
+也不同（见 permissions.py）：会话目录内的新文件直接放行，覆盖 / 越目录 /
+出围栏要么问用户、要么硬拒绝。
 """
 
 from .base import MAX_RESULT_CHARS, READ_ONLY, Capability, Tool, ToolRegistry, ToolResult
@@ -59,6 +62,7 @@ from .stock import (
     StockValuationTool,
     build_stock_tools,
 )
+from .write import WRITE_FILE_TOOL_NAME, WriteFileTool
 
 __all__ = [
     "ANOMALY_TOOL_NAME",
@@ -78,6 +82,7 @@ __all__ = [
     "READ_FILE_TOOL_NAME",
     "READ_ONLY",
     "VALUATION_TOOL_NAME",
+    "WRITE_FILE_TOOL_NAME",
     "Capability",
     "MarketAuctionBenchmarkTool",
     "MarketDragonTigerTool",
@@ -94,6 +99,7 @@ __all__ = [
     "StockQuoteTool",
     "StockValuationTool",
     "Tool",
+    "WriteFileTool",
     "ToolRegistry",
     "ToolResult",
     "build_market_tools",

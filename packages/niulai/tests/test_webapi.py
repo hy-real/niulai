@@ -6,6 +6,7 @@ P3.5 任务级 eval 的范畴；这里守住的是"装配正确、协议不破�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -15,8 +16,9 @@ from fastapi.testclient import TestClient
 from niulai.config import read_config_file
 from niulai.llm.types import Message
 from niulai.paths import trace_dir
+from niulai.permissions import Approval, PermissionRequest
 from niulai.session import SessionStore
-from niulai.webapi import create_app
+from niulai.webapi import WebApprovalChannel, create_app
 
 
 def _client(monkeypatch, tmp_path) -> TestClient:
@@ -39,7 +41,55 @@ def test_tools端点列出数据源与工具(monkeypatch, tmp_path):
         "stock_financial",
         "stock_moneyflow",
         "read_file",
+        "write_file",
     } <= names
+
+
+# --------------------------------------------------------------------------
+# 审批通道（WebApprovalChannel）
+# --------------------------------------------------------------------------
+
+
+def _pending_request() -> PermissionRequest:
+    return PermissionRequest(
+        request_id="req-1",
+        run_id="run-1",
+        session_id="sess-1",
+        tool="write_file",
+        summary="覆盖已存在的文件：sessions/sess-1/a.md",
+        reason="modify_existing",
+        arguments='{"path":"sessions/sess-1/a.md"}',
+        always_key="write_file:sessions/sess-1",
+    )
+
+
+async def test_web审批通道_答复递回来():
+    channel = WebApprovalChannel(timeout_s=5)
+    req = _pending_request()
+    task = asyncio.create_task(channel.request(req))
+    await asyncio.sleep(0)
+    assert channel.resolve("req-1", Approval(granted=True)) is True
+    approval = await task
+    assert approval.granted is True
+
+
+async def test_web审批通道_重复答复只认第一个():
+    channel = WebApprovalChannel(timeout_s=5)
+    task = asyncio.create_task(channel.request(_pending_request()))
+    await asyncio.sleep(0)
+    assert channel.resolve("req-1", Approval(granted=True)) is True
+    assert channel.resolve("req-1", Approval(granted=True)) is False
+    assert (await task).granted is True
+
+
+async def test_web审批通道_超时按拒绝处理():
+    """没人盯着的弹窗不能把 agent 永久挂起 —— fail-safe 拒绝。"""
+    channel = WebApprovalChannel(timeout_s=0.05)
+    approval = await channel.request(_pending_request())
+    assert approval.granted is False
+    assert approval.by == "timeout"
+    # 超时之后迟到的答复不再被接受
+    assert channel.resolve("req-1", Approval(granted=True)) is False
 
 
 def test_sessions端点_空目录返回空列表(monkeypatch, tmp_path):
@@ -102,7 +152,7 @@ def test_空问题返回422(monkeypatch, tmp_path):
 class _StubRuntime:
     """假内核：不联网，立即返回一个最小 run 结果。"""
 
-    async def run(self, task, *, emitter, messages, session_id):
+    async def run(self, task, *, emitter, messages, session_id, approval_channel=None):
         from niulai.llm.types import Usage
 
         class _Result:
@@ -124,7 +174,9 @@ def test_新会话在run开始前就落库(monkeypatch, tmp_path):
     monkeypatch.setenv("NIULAI_API_KEY", "sk-x")
     client = _client(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        webapi_mod, "_assemble", lambda settings: types.SimpleNamespace(runtime=_StubRuntime())
+        webapi_mod,
+        "_assemble",
+        lambda settings, **kw: types.SimpleNamespace(runtime=_StubRuntime()),
     )
 
     resp = client.post("/api/runs", json={"task": "茅台多少钱"})

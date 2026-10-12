@@ -183,6 +183,25 @@
   #saveCfg { background:var(--accent); color:#fff; border:0; }
   #saveCfg:hover { background:var(--accent-hover); }
   #saveNote { color:var(--green); font-size:12.5px; margin-top:8px; display:none; }
+
+  /* ---------- 审批弹窗（与设置弹窗共用 #overlay） ---------- */
+  #approval { width:460px; background:var(--panel); border:1px solid var(--border);
+              border-radius:16px; padding:22px 24px; box-shadow:var(--shadow-lg); }
+  #approval h2 { font-size:15px; font-weight:700; margin-bottom:4px; }
+  #approval .hint { color:var(--muted); font-size:11.5px; margin-bottom:14px;
+                    padding-bottom:10px; border-bottom:1px solid var(--border); }
+  #approval .atool { font-family:var(--mono); font-size:13px; color:var(--accent);
+                     margin-bottom:6px; word-break:break-all; }
+  #approval .asum { font-size:13px; margin-bottom:16px; word-break:break-all; }
+  #approval .actions { display:flex; justify-content:flex-end; gap:10px; }
+  #approval .actions button { padding:8px 18px; border-radius:10px; font:13px var(--sans);
+                              cursor:pointer; }
+  #apv_deny { background:var(--panel); border:1px solid var(--border2); color:var(--text); }
+  #apv_deny:hover { background:var(--panel2); }
+  #apv_allow { background:var(--panel); border:1px solid var(--border2); color:var(--text); }
+  #apv_allow:hover { background:var(--panel2); }
+  #apv_always { background:var(--accent); color:#fff; border:0; }
+  #apv_always:hover { background:var(--accent-hover); }
 </style>
 </head>
 <body>
@@ -243,6 +262,17 @@
 </main>
 
 <div id="overlay">
+  <div id="approval">
+    <h2>需要你的许可</h2>
+    <div class="hint">agent 想执行一个会写你电脑的操作。允许后本步继续；拒绝后它会换方案，或把内容直接给你、由你手动保存。</div>
+    <div class="atool" id="apv_tool"></div>
+    <div class="asum" id="apv_summary"></div>
+    <div class="actions">
+      <button id="apv_deny" type="button">拒绝</button>
+      <button id="apv_allow" type="button">允许</button>
+      <button id="apv_always" type="button">本会话总是允许</button>
+    </div>
+  </div>
   <div id="settings">
     <h2>设置</h2>
     <div class="hint">写入 ~/.niulai/config.toml，下一条提问即生效；若终端设了 NIULAI_* 环境变量则以环境变量优先</div>
@@ -458,6 +488,7 @@ function openSession(id) {
     activeId = id; sessionId = id;
     document.getElementById('sessTitle').textContent = s.title;
     chat.innerHTML = ''; bubble = null; toolCards.clear();
+    approvalQueue.length = 0; renderApproval();   // 别会话的挂起审批看不到了，交给超时
     el('line', '▸ 会话：' + s.title);
     (s.messages || []).forEach(renderHistoryMessage);
     // 该会话若有进行中的流：重放缓冲的实时事件，接着继续实时接收
@@ -510,10 +541,46 @@ document.getElementById('newChat').addEventListener('click', () => {
   sessionId = null; activeId = null;
   document.getElementById('sessTitle').textContent = '新会话';
   chat.innerHTML = ''; bubble = null; toolCards.clear();
+  approvalQueue.length = 0; renderApproval();
   document.getElementById('resumebar').classList.remove('show');
   updateEmpty();   // 回到首页式布局：居中的 K 线 + 快捷提问 + 输入框
   loadSessions();
 });
+
+/* ---------- 权限审批：弹窗队列（一次只显示一个，其余排队） ---------- */
+
+const approvalQueue = [];
+let approvalCurrent = null;
+
+function renderApproval() {
+  const overlay = document.getElementById('overlay');
+  if (!approvalQueue.length) {
+    approvalCurrent = null;
+    overlay.classList.remove('show');
+    return;
+  }
+  approvalCurrent = approvalQueue[0];
+  document.getElementById('apv_tool').textContent = '⚙ ' + approvalCurrent.tool;
+  document.getElementById('apv_summary').textContent = approvalCurrent.summary || '';
+  overlay.classList.add('show');
+}
+
+function respondApproval(granted, always) {
+  if (!approvalCurrent) return;
+  const runId = approvalCurrent.run_id;
+  fetch(`/api/runs/${encodeURIComponent(runId)}/permissions`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      request_id: approvalCurrent.request_id, granted: granted, always: !!always
+    })
+  }).catch(() => {});
+  // 不在这里摘队列：以服务端 permission_decision 事件为准（单一事实来源），
+  // 超时 / 取消导致的收尾也走同一条路。
+}
+
+document.getElementById('apv_allow').addEventListener('click', () => respondApproval(true, false));
+document.getElementById('apv_always').addEventListener('click', () => respondApproval(true, true));
+document.getElementById('apv_deny').addEventListener('click', () => respondApproval(false, false));
 
 /* ---------- 事件渲染（与 cli.py 的 ConsoleRenderer 同一张对照表） ---------- */
 
@@ -552,6 +619,15 @@ function handle(name, d) {
     }
   } else if (name === 'circuit_break') {
     bubble = null; el('line warn', '⛔ 熔断：' + d.name + ' 已被拦下，未执行');
+  } else if (name === 'permission_request') {
+    el('line warn', '⏸ 等待审批：' + d.tool + ' → ' + (d.summary || ''));
+    approvalQueue.push(d);
+    renderApproval();
+  } else if (name === 'permission_decision') {
+    approvalQueue = approvalQueue.filter(r => r.request_id !== d.request_id);
+    renderApproval();
+    if (d.granted) el('line', '✓ 已许可' + (d.always ? '（本会话不再问）' : ''));
+    else el('line err', '✗ 未许可（' + (d.by || 'user') + '）');
   } else if (name === 'artifact') {
     el('line', '📄 结果过大已落盘：' + d.path + '（' + (d.content_chars || 0).toLocaleString() + ' 字符）');
   } else if (name === 'error') {
@@ -623,6 +699,7 @@ async function send() {
         else entry.buffer.push([evName, d]);
         if (evName === 'run_result') {
           busySet.delete(sid); streams.delete(sid);
+          approvalQueue.length = 0; renderApproval();   // run 收尾：挂起的审批随通道一起作废
           refreshInputState(); loadSessions();
         }
       }
@@ -635,6 +712,7 @@ async function send() {
     // 无论以哪种方式结束都释放占位，否则输入框会被永久锁死。
     busySet.delete(sid);
     if (streams.get(sid) === entry) streams.delete(sid);
+    approvalQueue.length = 0; renderApproval();
     refreshInputState();
   }
 }
@@ -669,7 +747,11 @@ document.getElementById('settingsBtn').addEventListener('click', () => {
   }).catch(() => {});
 });
 document.getElementById('cancelCfg').addEventListener('click', () => overlay.classList.remove('show'));
-overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.remove('show'); });
+overlay.addEventListener('click', e => {
+  // 审批弹窗打开时，点 backdrop 不关闭 —— 必须显式答复（允许 / 拒绝），
+  // 否则 agent 会一直等到超时。
+  if (e.target === overlay && !approvalCurrent) overlay.classList.remove('show');
+});
 document.getElementById('saveCfg').addEventListener('click', () => {
   const num = id => {
     const v = document.getElementById(id).value.trim();

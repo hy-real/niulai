@@ -14,6 +14,14 @@
 第 4 条不自己造"取消标志位"：`asyncio` 的任务取消会逐层透传，
 自己加一套标志反而最容易漏掉某一层。
 
+## 权限门：写类工具过闸，只读过站
+
+`_run_tools` 的阶段一是三道串行检查：熔断（guard）→ 权限（gate）→ 执行。
+权限门对只读工具一律放行；写类工具命中"要问"时发出 `permission_request`
+事件并 await 外壳答复（CLI 弹 y/n、Web 弹窗）—— 审批是事件不是同步 if，
+所以无人值守时 fail-safe 默认拒绝。被拦下的调用照样回灌一条 tool 消息，
+内容写成"不要再尝试"（见 permissions.py 与 architecture.md 7.14）。
+
 ## transcript 是入口，不是内部细节
 
 `run()` 接受一份已有的 messages 并在后面追加，而不是每次从零构建。
@@ -40,6 +48,12 @@ from ..context import fit_context
 from ..events import EventEmitter, EventType
 from ..llm import LLMClient, LLMResponse, Message, Usage
 from ..llm.types import ToolCall
+from ..permissions import (
+    ApprovalChannel,
+    ApprovalMemory,
+    PermissionGate,
+    session_scope_dir,
+)
 from ..tools import ToolRegistry
 from .guard import ToolGuard
 from .prompt import load_prompt
@@ -86,11 +100,19 @@ class AgentRuntime:
         llm: LLMClient,
         tools: ToolRegistry,
         system_prompt: str | None = None,
+        approval_channel: ApprovalChannel | None = None,
+        approval_memory: ApprovalMemory | None = None,
     ) -> None:
         self._settings = settings
         self._llm = llm
         self._tools = tools
         self._system_prompt = system_prompt if system_prompt is not None else load_prompt()
+        # 审批通道（外壳提供）。None = 无人可问，命中 ask 一律按拒绝处理
+        # （fail-safe，见 permissions.py）。CLI 在构造时给；Web 的通道是
+        # 每 run 一个，走 run() 的 approval_channel 参数。
+        self._approval_channel = approval_channel
+        # "总是允许"的会话级记忆：按会话隔离、跨 run 有效、重启即忘
+        self._approval_memory = approval_memory or ApprovalMemory()
 
     async def run(
         self,
@@ -99,15 +121,25 @@ class AgentRuntime:
         emitter: EventEmitter,
         messages: Sequence[Message] | None = None,
         session_id: str | None = None,
+        approval_channel: ApprovalChannel | None = None,
     ) -> RunResult:
         """跑一次任务。
 
         `messages` 是**已有的对话历史**（不含 system）。传进来就续写，
         不传就是一次全新任务。调用方拿 `RunResult.messages` 作为下一次的输入。
+
+        `approval_channel` 是**本 run 专用**的审批通道（Web 外壳每 run 建一个，
+        因为 SSE 连接是每 run 一条）；不传则用构造时给的（CLI 的交互通道）。
         """
         transcript = list(messages) if messages else []
         resumed = bool(transcript)
-        _ensure_system(transcript, self._system_prompt)
+        # 运行时上下文（会话 id / 输出目录）每轮注入 system：会话里存的是
+        # 完整 transcript，system 不落库，所以这里注入不会污染历史
+        _ensure_system(
+            transcript,
+            self._system_prompt,
+            note=_runtime_note(session_id, emitter.run_id),
+        )
         repaired = _repair_transcript(transcript)
         transcript.append(Message(role="user", content=task))
 
@@ -117,6 +149,13 @@ class AgentRuntime:
         turn = 0
         omitted_total = 0
         guard = ToolGuard(max_consecutive_failures=self._settings.max_consecutive_failures)
+        gate = PermissionGate(
+            emitter=emitter,
+            channel=approval_channel or self._approval_channel,
+            memory=self._approval_memory,
+            session_id=session_id,
+            run_id=emitter.run_id,
+        )
         streamed: list[str] = []       # 本轮流式输出的累计 —— 取消时用它留住半截回答
         assistant_recorded = False     # 本轮 assistant 消息是否已写入 transcript
 
@@ -201,7 +240,9 @@ class AgentRuntime:
                     stop_reason = "done"
                     break
 
-                await self._run_tools(response, transcript, emitter, turn=turn, guard=guard)
+                await self._run_tools(
+                    response, transcript, emitter, turn=turn, guard=guard, gate=gate
+                )
 
             emitter.emit(EventType.FINAL, text=final_text, stop_reason=stop_reason)
             return RunResult(
@@ -254,12 +295,14 @@ class AgentRuntime:
         *,
         turn: int,
         guard: ToolGuard,
+        gate: PermissionGate,
     ) -> None:
         """执行这一轮声明的全部 tool_calls，并把结果回灌进 messages。
 
         **检查串行、执行并行**：先按声明顺序逐个过熔断（guard 的状态是顺序
-        敏感的 —— 同一批里完全重复的调用，第二个就该被拦下），放行的调用经
-        信号量限流后并发执行（asyncio.gather）。
+        敏感的 —— 同一批里完全重复的调用，第二个就该被拦下），再过权限门
+        （ask 要等人答复，天然只能一个一个来），放行的调用经信号量限流后
+        并发执行（asyncio.gather）。
 
         结果消息的回灌顺序只由**模型声明的顺序**决定，与完成先后无关：
         TOOL_RESULT 事件随完成实时发出（前端按 tool_call_id 归位），
@@ -282,40 +325,66 @@ class AgentRuntime:
             _emit_tool_result(emitter, turn=turn, call=call, result=result)
             return result
 
-        # 阶段一（串行）：声明顺序过熔断，放行的立刻起任务。
-        # 阶段一是纯同步循环（无 await），所以所有 TOOL_CALL 事件都先于执行发出。
+        # 阶段一（串行）：声明顺序过熔断、过权限门，放行的立刻起任务。
+        # 这里可能有 await（审批等人），取消时要把已起的任务收掉，
+        # 否则它们会变成脱离本 run 的孤儿。
         plans: list[tuple[ToolCall, asyncio.Task | None, Message | None]] = []
-        for call in response.tool_calls:
-            emitter.emit(
-                EventType.TOOL_CALL, turn=turn, name=call.name, arguments=call.arguments,
-                tool_call_id=call.id,
-            )
-
-            breaker = guard.check(call)
-            if breaker is not None:
-                # 熔断：不执行，但照样回灌。内容写成"别再试了，改走别的路"。
+        try:
+            for call in response.tool_calls:
                 emitter.emit(
-                    EventType.CIRCUIT_BREAK,
-                    turn=turn,
-                    name=call.name,
-                    reason=breaker.reason,
-                    message=breaker.message,
+                    EventType.TOOL_CALL, turn=turn, name=call.name, arguments=call.arguments,
                     tool_call_id=call.id,
                 )
-                plans.append((
-                    call,
-                    None,
-                    Message(
-                        role="tool",
-                        content=breaker.message,
-                        tool_call_id=call.id,
-                        name=call.name,
-                        is_error=True,
-                    ),
-                ))
-                continue
 
-            plans.append((call, asyncio.create_task(_execute(call)), None))
+                breaker = guard.check(call)
+                if breaker is not None:
+                    # 熔断：不执行，但照样回灌。内容写成"别再试了，改走别的路"。
+                    emitter.emit(
+                        EventType.CIRCUIT_BREAK,
+                        turn=turn,
+                        name=call.name,
+                        reason=breaker.reason,
+                        message=breaker.message,
+                        tool_call_id=call.id,
+                    )
+                    plans.append((
+                        call,
+                        None,
+                        Message(
+                            role="tool",
+                            content=breaker.message,
+                            tool_call_id=call.id,
+                            name=call.name,
+                            is_error=True,
+                        ),
+                    ))
+                    continue
+
+                blocked = await gate.check(
+                    call, self._tools.capabilities(call.name), turn=turn
+                )
+                if blocked is not None:
+                    # 被权限门拦下（deny / 用户拒绝）：不执行，照样回灌。
+                    # 内容写成"不要再尝试"—— 否则模型会换个参数反复重试。
+                    plans.append((
+                        call,
+                        None,
+                        Message(
+                            role="tool",
+                            content=blocked,
+                            tool_call_id=call.id,
+                            name=call.name,
+                            is_error=True,
+                        ),
+                    ))
+                    continue
+
+                plans.append((call, asyncio.create_task(_execute(call)), None))
+        except asyncio.CancelledError:
+            for _, task, _ in plans:
+                if task is not None:
+                    task.cancel()
+            raise
 
         # 阶段二（并行）：等全部放行的调用落定。execute() 内部已把工具错误
         # 转成 ok=False 的结果，能从这里冒出来的异常都是内部错误 —— 语义与
@@ -404,16 +473,38 @@ def _emit_tool_result(emitter: EventEmitter, *, turn: int, call: ToolCall, resul
     )
 
 
-def _ensure_system(messages: list[Message], system_prompt: str) -> None:
+def _ensure_system(messages: list[Message], system_prompt: str, note: str = "") -> None:
     """保证首条是 system。
 
     会话里**不存 system 消息**，每次由 runtime 注入最新的那份 ——
     这样改了 prompt 立刻对老会话生效，prompt 版本化才有意义。
+
+    `note` 是运行时上下文（当前会话 id / 输出目录），跟在正式 prompt 后面。
+    它也必须每轮重算：同一会话的下一轮 run 拿到的还是这份，但 run 目录
+    （无会话时）每次都不同。
     """
+    content = f"{system_prompt}\n\n{note}" if note else system_prompt
     if messages and messages[0].role == "system":
-        messages[0] = Message(role="system", content=system_prompt)
+        messages[0] = Message(role="system", content=content)
         return
-    messages.insert(0, Message(role="system", content=system_prompt))
+    messages.insert(0, Message(role="system", content=content))
+
+
+def _runtime_note(session_id: str | None, run_id: str) -> str:
+    """每轮注入给模型的运行时上下文。
+
+    输出目录必须由系统给出、不让模型猜：写文件的路径判定（放行 / 询问 /
+    拒绝）是确定性的，模型把目录猜错 = 白白弹一次审批。
+    """
+    scope = session_scope_dir(session_id, run_id)
+    who = session_id or "无（一次性提问）"
+    return (
+        "# 运行时上下文（系统每轮注入，不是用户说的话）\n"
+        f"- 当前会话 id：{who}\n"
+        f"- 文件输出目录：{scope}/ —— 用 write_file 落报告时用它做路径前缀，"
+        "例如 "
+        f"`{scope}/报告.md`"
+    )
 
 
 def _repair_transcript(messages: list[Message]) -> int:

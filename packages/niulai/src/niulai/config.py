@@ -77,6 +77,9 @@ DEFAULT_MAX_RETRIES = 2
 # 同一工具连续失败几次就熔断。见 agent/guard.py —— 这是把 prompt 里的
 # "连续失败两次就停"变成 runtime 强制的那个开关。
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 2
+# Web 外壳的审批等待上限（秒）。超时按拒绝处理（fail-safe，见 permissions.py）。
+# CLI 交互式通道不设超时 —— 用户就在终端前，Ctrl-C 取消整轮即拒绝。
+DEFAULT_APPROVAL_TIMEOUT_S = 120.0
 # 发给模型时保留最近几条工具结果的原样内容（更早的换成占位说明）。
 DEFAULT_KEEP_RECENT_TOOL_RESULTS = 15
 # Anthropic 的 max_tokens 是必填项，而且**包含思考预算** ——
@@ -157,6 +160,7 @@ class Settings:
     max_retries: int = DEFAULT_MAX_RETRIES
     max_tokens: int = DEFAULT_MAX_TOKENS
     max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES
+    approval_timeout_s: float = DEFAULT_APPROVAL_TIMEOUT_S
     keep_recent_tool_results: int = DEFAULT_KEEP_RECENT_TOOL_RESULTS
     # 仅 Anthropic 生效：给 system 挂缓存断点（服务端低于最小长度会静默跳过）
     prompt_cache: bool = True
@@ -214,6 +218,9 @@ class Settings:
             max_tokens=_int_from(llm, "max_tokens", DEFAULT_MAX_TOKENS),
             max_consecutive_failures=_int_from(
                 llm, "max_consecutive_failures", DEFAULT_MAX_CONSECUTIVE_FAILURES
+            ),
+            approval_timeout_s=_float_from(
+                llm, "approval_timeout_s", DEFAULT_APPROVAL_TIMEOUT_S
             ),
             keep_recent_tool_results=_int_from(
                 llm, "keep_recent_tool_results", DEFAULT_KEEP_RECENT_TOOL_RESULTS

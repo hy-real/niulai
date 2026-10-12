@@ -25,6 +25,11 @@ class EventType(str, Enum):
     # 运行时熔断：拦下一次重复 / 连续失败的调用。
     # 单独成一个事件，是为了让"agent 试图空转"这件事在 UI 和 trace 里都看得见。
     CIRCUIT_BREAK = "circuit_break"
+    # 权限审批（7.12 / 7.14）：写类工具命中"要问"的判定时发出，内核 await
+    # 外壳答复（CLI y/n、Web 弹窗）。两个事件都进 trace —— 回放时要看得见
+    # "用户当时批了什么、谁批的"（超时拒绝也要留痕）。
+    PERMISSION_REQUEST = "permission_request"
+    PERMISSION_DECISION = "permission_decision"
     # 大结果已落盘，上下文里只留摘要 + 路径
     ARTIFACT = "artifact"
     USAGE = "usage"

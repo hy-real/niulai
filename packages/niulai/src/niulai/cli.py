@@ -29,17 +29,24 @@ from typing import Any
 
 from . import __version__
 from .agent import AgentRuntime, RunResult
+from .agent.loop import _repair_transcript
 from .artifacts import ArtifactStore
 from .config import Settings, read_config_file, read_ths_api_key
 from .datasource import build_default_service
 from .errors import ConfigError, NiulaiError
 from .events import Event, EventEmitter, EventType, new_run_id
-from .agent.loop import _repair_transcript
 from .llm import Usage, build_client
 from .logs import setup_logging
+from .permissions import Approval, ApprovalChannel, ApprovalMemory, PermissionRequest
 from .session import Session, SessionStore
+from .tools import (
+    ReadFileTool,
+    ToolRegistry,
+    WriteFileTool,
+    build_market_tools,
+    build_stock_tools,
+)
 from .trace import TraceResumeError, TraceWriter, load_transcript, read_trace, resolve_run
-from .tools import ReadFileTool, ToolRegistry, build_market_tools, build_stock_tools
 
 STOP_REASON_LABEL = {
     "done": "正常结束",
@@ -118,6 +125,20 @@ class ConsoleRenderer:
             kind = "重复调用" if data.get("reason") == "duplicate_call" else "连续失败"
             print(self.c.yellow(f"  ⛔ 熔断（{kind}）：{data.get('name')} 已被拦下，未执行"))
 
+        elif event.type is EventType.PERMISSION_REQUEST:
+            # 交互提示由 CliApprovalChannel 自己打印（它要读 stdin），
+            # 这里只负责把"被策略硬拒绝"（没有 request）的结果显示出来。
+            pass
+
+        elif event.type is EventType.PERMISSION_DECISION:
+            self._newline()
+            if data.get("granted"):
+                note = "（本会话不再问）" if data.get("always") else ""
+                print(self.c.green(f"  ✓ 已许可{note}"))
+            else:
+                by = data.get("by") or "user"
+                print(self.c.red(f"  ✗ 未许可（{by}）"))
+
         elif event.type is EventType.ARTIFACT:
             self._newline()
             print(
@@ -171,6 +192,44 @@ def _enable_windows_ansi() -> None:
 
 
 # --------------------------------------------------------------------------
+# 审批通道（终端）
+# --------------------------------------------------------------------------
+
+
+class CliApprovalChannel:
+    """终端审批通道：弹 y/n/a，交互式，**不设超时**。
+
+    不设超时的理由：用户就在终端前，等待本身就是交互的一部分；要走开 /
+    无人值守的场景本来就不该用 CLI。Ctrl-C 取消整轮 = 拒绝（CancelledError
+    透传到内核，与点停止同一条链路）。
+
+    `always`（本会话不再问）的记忆不在通道里 —— 它按会话跨 run 有效，
+    住在 runtime 持有的 ApprovalMemory 中（见 permissions.py）。
+    """
+
+    def __init__(self, color: Palette) -> None:
+        self._color = color
+
+    async def request(self, req: PermissionRequest) -> Approval:
+        print()
+        print(self._color.yellow(f"  ⚠ 需要你的许可：{req.tool}"))
+        print(self._color.dim(f"    {req.summary}"))
+        try:
+            line = await asyncio.to_thread(
+                input, self._color.cyan("    允许？[y]es / [n]o / [a]lways（本会话不再问）› ")
+            )
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return Approval(granted=False, by="cancelled")
+        answer = line.strip().lower()
+        if answer in ("a", "always"):
+            return Approval(granted=True, always=True)
+        if answer in ("n", "no"):
+            return Approval(granted=False)
+        return Approval(granted=True)  # y / yes / 直接回车
+
+
+# --------------------------------------------------------------------------
 # 装配
 # --------------------------------------------------------------------------
 
@@ -187,15 +246,31 @@ class Assembly:
     store: Any = None
 
 
-def _assemble(settings: Settings) -> Assembly:
+def _assemble(
+    settings: Settings,
+    *,
+    approval_channel: ApprovalChannel | None = None,
+    approval_memory: ApprovalMemory | None = None,
+) -> Assembly:
     store = ArtifactStore()
     service = build_default_service(ths_api_key=read_ths_api_key())
     tools = ToolRegistry(
-        [*build_stock_tools(service), *build_market_tools(service), ReadFileTool(store)],
+        [
+            *build_stock_tools(service),
+            *build_market_tools(service),
+            ReadFileTool(store),
+            WriteFileTool(),
+        ],
         artifact_store=store,
     )
     llm = build_client(settings)
-    runtime = AgentRuntime(settings=settings, llm=llm, tools=tools)
+    runtime = AgentRuntime(
+        settings=settings,
+        llm=llm,
+        tools=tools,
+        approval_channel=approval_channel,
+        approval_memory=approval_memory,
+    )
     return Assembly(runtime=runtime, llm=llm, service=service, tools=tools, store=store)
 
 
@@ -215,11 +290,15 @@ async def _run_turn(
     json_out: bool = False,
     renderer: ConsoleRenderer | None = None,
     write_trace: bool = True,
+    approval_channel: ApprovalChannel | None = None,
 ) -> TurnOutcome:
     """跑一轮（一次 run），并把结果并回会话。
 
     `session` 传了就续写历史 —— 这正是"内核负责一次 run、会话负责多轮"的边界：
     内核不知道有没有会话，它只是接受一份 transcript。
+
+    `approval_channel` 不传（如 `--json` 模式）时，命中审批的工具调用按
+    拒绝处理（fail-safe）—— 管道消费方没人能回答 y/n。
     """
     run_id = new_run_id()
     emitter = EventEmitter(run_id)
@@ -243,6 +322,7 @@ async def _run_turn(
         emitter=emitter,
         messages=session.messages if session else None,
         session_id=session.id if session else None,
+        approval_channel=approval_channel,
     )
 
     if session is not None:
@@ -294,7 +374,9 @@ async def _cmd_ask(args: argparse.Namespace) -> int:
         max_turns=args.max_turns,
     )
     color = Palette(use_color())
-    asm = _assemble(settings)
+    # --json 是管道模式：没人能回答 y/n，审批一律按拒绝处理（fail-safe）
+    channel = None if args.json else CliApprovalChannel(color)
+    asm = _assemble(settings, approval_channel=channel)
 
     session: Session | None = None
     store = SessionStore()
@@ -349,7 +431,7 @@ async def _cmd_chat(args: argparse.Namespace) -> int:
         max_turns=args.max_turns,
     )
     color = Palette(use_color())
-    asm = _assemble(settings)
+    asm = _assemble(settings, approval_channel=CliApprovalChannel(color))
     store = SessionStore()
     renderer = ConsoleRenderer(color)
 
@@ -585,7 +667,12 @@ def _cmd_tools() -> int:
     store = ArtifactStore()
     service = build_default_service(ths_api_key=read_ths_api_key())
     tools = ToolRegistry(
-        [*build_stock_tools(service), *build_market_tools(service), ReadFileTool(store)],
+        [
+            *build_stock_tools(service),
+            *build_market_tools(service),
+            ReadFileTool(store),
+            WriteFileTool(),
+        ],
         artifact_store=store,
     )
 

@@ -43,12 +43,52 @@ from .errors import ConfigError
 from .events import EventEmitter, EventType, new_run_id
 from .llm import Usage
 from .paths import trace_dir
+from .permissions import Approval, ApprovalMemory, PermissionRequest
 from .session import TITLE_CHARS, SessionError, SessionStore, _ts_ms
 from .trace import TraceResumeError, TraceWriter, load_transcript, read_trace
 
 DEFAULT_PORT = 8710
 
 _DONE = object()  # 队列哨兵：run 任务已结束（区别于任何 Event）
+
+
+class WebApprovalChannel:
+    """Web 审批通道：`permission_request` 事件已随 SSE 推给浏览器，这里等
+    前端 POST 答复（见 /api/runs/{run_id}/permissions）。
+
+    **超时在通道里施加**（默认拒绝，fail-safe）：没人盯着的弹窗不该把
+    agent 永久挂起。超时决定与用户拒绝一样进 trace（by="timeout"）。
+
+    **幂等**：同一 request_id 只接受第一个答复，重复 POST 返回 False
+    （7.14 第 6 条 —— 用户点两次"批准"不能执行两次）。
+    """
+
+    def __init__(self, timeout_s: float = 120.0) -> None:
+        self._timeout_s = timeout_s
+        self._pending: dict[str, asyncio.Future[Approval]] = {}
+
+    async def request(self, req: PermissionRequest) -> Approval:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Approval] = loop.create_future()
+        self._pending[req.request_id] = future
+        try:
+            return await asyncio.wait_for(future, timeout=self._timeout_s)
+        except TimeoutError:
+            return Approval(granted=False, by="timeout")
+        finally:
+            self._pending.pop(req.request_id, None)
+
+    def resolve(self, request_id: str, approval: Approval) -> bool:
+        """递一个答复进去。已答复 / 已超时 / 不认识 → False（调用方转 409）。"""
+        future = self._pending.get(request_id)
+        if future is None or future.done():
+            return False
+        future.set_result(approval)
+        return True
+
+
+# 进行中 run 的审批通道：run_id -> channel。POST 端点据此找到要答复的弹窗。
+_APPROVALS: dict[str, WebApprovalChannel] = {}
 
 
 def web_dir() -> Path | None:
@@ -143,6 +183,14 @@ class RunRequest(BaseModel):
     session_id: str | None = None
 
 
+class PermissionDecision(BaseModel):
+    """审批弹窗的答复。request_id 是幂等键，重复答复只认第一个。"""
+
+    request_id: str
+    granted: bool
+    always: bool = False
+
+
 class ConfigUpdate(BaseModel):
     """设置面板提交的字段。None / 空串 = 不修改该项（api_key 同理，防止误清空）。"""
 
@@ -197,12 +245,15 @@ def create_app() -> FastAPI:
     # ArtifactStore 的数据目录在构造时解析，模块级会抢在测试设置
     # NIULAI_HOME 之前定型（SessionStore 同理，见下）。
     _asm_cache: dict[tuple[Settings, str], Assembly] = {}
+    # "总是允许"的会话级记忆跨装配共享：改一次配置会重建 runtime，
+    # 但用户在本会话里批过的"不再问"不该因此失效
+    _approval_memory = ApprovalMemory()
 
     def _get_asm(settings: Settings) -> Assembly:
         cache_key = (settings, read_ths_api_key())
         asm = _asm_cache.get(cache_key)
         if asm is None:
-            asm = _assemble(settings)
+            asm = _assemble(settings, approval_memory=_approval_memory)
             _asm_cache[cache_key] = asm
         return asm
 
@@ -451,12 +502,18 @@ def create_app() -> FastAPI:
             queue: asyncio.Queue[Any] = asyncio.Queue()
             emitter.subscribe(queue.put_nowait)
 
+            # 审批通道是**每 run 一个**：弹窗挂在一条 SSE 连接上，通道跟着
+            # 连接走。超时值走 Settings（config.toml [llm] 可调）。
+            channel = WebApprovalChannel(timeout_s=settings.approval_timeout_s)
+            _APPROVALS[run_id] = channel
+
             run_task = asyncio.create_task(
                 asm.runtime.run(
                     task_text,
                     emitter=emitter,
                     messages=session.messages,
                     session_id=session.id,
+                    approval_channel=channel,
                 )
             )
             _RUNS.attach(run_id, run_task)
@@ -514,6 +571,7 @@ def create_app() -> FastAPI:
                 # llm / service 是共享装配，不在这里关——lifespan 统一收尾。
                 if not run_task.done():
                     run_task.cancel()
+                _APPROVALS.pop(run_id, None)
                 _RUNS.finish(run_id)
 
         return StreamingResponse(
@@ -528,6 +586,23 @@ def create_app() -> FastAPI:
         if task is None or task.done():
             raise HTTPException(status_code=404, detail="没有正在运行的该任务")
         task.cancel()
+        return {"ok": True}
+
+    @app.post("/api/runs/{run_id}/permissions")
+    async def api_permission(run_id: str, body: PermissionDecision):
+        """答复一个等待中的审批（前端审批弹窗的"允许 / 总是允许 / 拒绝"）。
+
+        409 = 已答复过或已超时——重复 POST 不执行第二次（幂等，7.14 第 6 条）。
+        """
+        channel = _APPROVALS.get(run_id)
+        if channel is None:
+            raise HTTPException(status_code=404, detail="没有等待审批的任务")
+        ok = channel.resolve(
+            body.request_id,
+            Approval(granted=body.granted, always=body.always, by="user"),
+        )
+        if not ok:
+            raise HTTPException(status_code=409, detail="该审批已处理或已超时")
         return {"ok": True}
 
     return app
