@@ -6,7 +6,7 @@
 - 纯 JSON over HTTP，httpx 直接拿，包体零负担（akshare 会拖进 pandas + numpy）；
 - 有名称搜索接口，所以「茅台」能直接解析成 600519。
 
-⚠️ 这些是非官方公开接口，属灰色地带。**仅用于学习研究**，
+⚠️ 这些是非官方公开接口，属灰色地带。仅用于学习研究，
    数据版权归原平台所有，请控制请求频率、勿商用。
 
 ## 两个已经踩过的坑（改这里之前先看）
@@ -506,7 +506,7 @@ def parse_moneyflow(data: dict[str, Any], *, fallback_symbol: str = "") -> Money
 
 
 def _guess_market(code: str) -> str:
-    """按代码首位猜交易所。猜不出来就让用户写 sh / sz 前缀，不要瞎猜。"""
+    """按代码首位猜交易所。猜不出来就要求调用方写 sh / sz 前缀。"""
     if code[0] in "569":
         return "1"
     if code[0] in "0123":

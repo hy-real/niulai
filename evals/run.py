@@ -1,12 +1,12 @@
 """eval 运行器：把 tasks.py 里的每条任务跑一遍真 LLM，逐条断言，出报告。
 
-它和 pytest 完全分离 —— pytest 验证内核机制（mock、无网络、秒级），
-这里验证端到端行为（真模型、要 Key、按需跑）。跑一次的成本是
-任务数 × 每任务几轮对话的 token，属于"改 prompt / schema 前后各跑一次"的标尺。
+与 pytest 完全分离 —— pytest 验证内核机制（mock、无网络、秒级），这里
+验证端到端行为（真模型、要 Key、按需跑）。跑一次的成本是任务数 × 每任务
+几轮对话的 token，属于"改 prompt / schema 前后各跑一次"的标尺。
 
-为什么断言长这样：RunResult 里有全部事实（transcript、turns、stop_reason），
-断言只是对它做机械检查。模型"表现好"的定义被拆成一个个可判定的侧面，
-而不是一个笼统的分数 —— 分数没法归因，断言可以。
+断言只对 RunResult 做机械检查（transcript、turns、stop_reason 里都有），
+模型"表现好"被拆成一个个可判定的侧面，而不是一个笼统的分数 —— 分数没法
+归因，断言可以。
 """
 
 from __future__ import annotations

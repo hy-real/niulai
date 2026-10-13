@@ -1,48 +1,29 @@
-"""手写 ReAct 内核。
-
-这是整个项目的核心，也是"为什么值得手写"的答案：
-循环本身只有几十行，但预算、取消、截断、错误回灌这些细节全在这里。
-上了框架，这些恰好会被藏起来 —— 而它们正是面试会被追问的东西。
+"""手写 ReAct 内核：循环、预算、取消、截断与错误回灌。
 
 四个停止条件，缺一不可：
 
-1. 模型不再要求调用工具 → 正常结束
-2. 达到轮数上限        → 强制收敛（最后一轮不让调工具）
-3. 外部取消            → 取消也是**收尾**：返回 stop_reason=cancelled 的半成品结果
-4. 运行时熔断          → 重复 / 连续失败的调用被拦下，逼模型收敛
+1. 模型不再要求调用工具 → 正常结束；
+2. 达到轮数上限 → 强制收敛（最后一轮不让调工具）；
+3. 外部取消 → 收尾为半成品结果（stop_reason=cancelled）；
+4. 运行时熔断 → 重复 / 连续失败的调用被拦下，逼模型收敛。
 
-第 4 条不自己造"取消标志位"：`asyncio` 的任务取消会逐层透传，
-自己加一套标志反而最容易漏掉某一层。
+取消不另设标志位，依赖 asyncio 任务取消逐层透传。
 
-## 权限门：写类工具过闸，只读过站
+权限门：只读工具一律放行；写类工具命中"要问"时发出 permission_request
+事件并等待外壳答复（CLI 弹 y/n、Web 弹窗）。审批是事件而非同步 if，
+无人值守时 fail-safe 默认拒绝；被拦下的调用同样回灌一条 tool 消息，
+内容提示模型不要再尝试。
 
-`_run_tools` 的阶段一是三道串行检查：熔断（guard）→ 权限（gate）→ 执行。
-权限门对只读工具一律放行；写类工具命中"要问"时发出 `permission_request`
-事件并 await 外壳答复（CLI 弹 y/n、Web 弹窗）—— 审批是事件不是同步 if，
-所以无人值守时 fail-safe 默认拒绝。被拦下的调用照样回灌一条 tool 消息，
-内容写成"不要再尝试"（见 permissions.py 与 architecture.md 7.14）。
+`write_report` 是内核级虚拟工具：spec 由循环动态注入（装配了
+ReportDelegate 才注入），调用分发到 agent/report.py 的嵌套 run，
+注册表因此保持"数据工具执行器"的单一职责。子 run 的事件经
+SubAgentEmitter 打标汇入同一条流，seq 连续，用量合并回父 run。
 
-## 子代理：write_report 是内核级虚拟工具
+`run()` 接受已有的 messages 并在后面追加：多轮会话与断点恢复共用
+同一入口，恢复能力不必实现第二遍。
 
-报告委派**不走 ToolRegistry**：`write_report` 的 spec 由循环动态注入给模型
-（装配了 ReportDelegate 才注入），调用由循环分发到 `agent/report.py` 的嵌套
-run。这样注册表保持"数据工具执行器"的单一职责，而委派所需的每次 run 状态
-（emitter / session_id / 审批通道）天然就在循环手里。子 run 的事件经
-SubAgentEmitter 打标汇入同一条流，seq 连续；用量合并回父 run 的统计。
-
-## transcript 是入口，不是内部细节
-
-`run()` 接受一份已有的 messages 并在后面追加，而不是每次从零构建。
-这一个改动同时买到两件事：
-
-- **多轮会话**：用户说"它今天成交多少"能指代上一轮那只股票；
-- **断点恢复**：崩溃后接着跑同一条 run。
-
-两者共用同一个入口，所以恢复能力不用再实现第二遍。
-
-（命名注意：这里的 `turn` 是 **ReAct 轮** —— 一次 LLM 调用算一轮。
-对话语境里的"一轮"通常指用户的一次提问，那对应一次 `run`。
-两者数量完全不同（一次提问可能跑 5 个 ReAct 轮），混用会让预算统计全乱。）
+命名约定：turn 指一次 LLM 调用（ReAct 轮）；一次用户提问对应一次
+run。一次提问可能包含多个 ReAct 轮，混用会让预算统计错乱。
 """
 
 from __future__ import annotations
@@ -83,16 +64,15 @@ FORCE_ANSWER_PROMPT = (
 # 工具结果写进事件流时的预览长度（完整内容仍然在 messages 里）
 RESULT_PREVIEW_CHARS = 600
 
-# 中断后补的那条 tool 结果。**不能假定它成功或失败** ——
-# 工具可能已经发出了请求、只是结果没回来。对只读行情无所谓，
-# 对写类工具这就是事故（见 architecture.md 7.13 的幂等一节）。
+# 中断后补的 tool 结果。不能假定成功或失败：工具可能已发出请求、只是
+# 结果没回来。对只读行情无所谓，对写类工具就是事故。
 INTERRUPTED_RESULT = (
     "[这次工具调用被中断了，结果未知。不要假定它成功或失败 —— "
     "如果这份数据仍然需要，请重新调用一次。]"
 )
 
-# 同一轮多个 tool_calls 的并发执行上限。数据源（东财）有限流，不能无脑并发；
-# 偶发 429 由数据源层的限流重试兜住，这里只负责"别自己打自己"。
+# 同一轮多个 tool_calls 的并发执行上限。数据源有限流，不能无脑并发；
+# 偶发 429 由数据源层的重试兜住，这里只负责限制自身并发。
 MAX_PARALLEL_TOOL_CALLS = 4
 
 
@@ -126,13 +106,13 @@ class AgentRuntime:
         self._tools = tools
         self._system_prompt = system_prompt if system_prompt is not None else load_prompt()
         # 审批通道（外壳提供）。None = 无人可问，命中 ask 一律按拒绝处理
-        # （fail-safe，见 permissions.py）。CLI 在构造时给；Web 的通道是
-        # 每 run 一个，走 run() 的 approval_channel 参数。
+        # （fail-safe）。CLI 在构造时给；Web 的通道每 run 一个，
+        # 走 run() 的 approval_channel 参数。
         self._approval_channel = approval_channel
         # "总是允许"的会话级记忆：按会话隔离、跨 run 有效、重启即忘
         self._approval_memory = approval_memory or ApprovalMemory()
         # 报告子代理委派器。None = 未装配（测试 / 极简用法）：模型看不到
-        # write_report，也不会被分发 —— 功能是"装配即有"，不是永远在。
+        # write_report，也不会被分发。功能装配即有，并非永远在线。
         self._report_delegate = report_delegate
 
     async def run(
@@ -147,20 +127,20 @@ class AgentRuntime:
     ) -> RunResult:
         """跑一次任务。
 
-        `messages` 是**已有的对话历史**（不含 system）。传进来就续写，
-        不传就是一次全新任务。调用方拿 `RunResult.messages` 作为下一次的输入。
+        `messages` 是已有的对话历史（不含 system）：传进来就续写，不传
+        就是一次全新任务。调用方拿 `RunResult.messages` 作为下一次的输入。
 
-        `approval_channel` 是**本 run 专用**的审批通道（Web 外壳每 run 建一个，
-        因为 SSE 连接是每 run 一条）；不传则用构造时给的（CLI 的交互通道）。
+        `approval_channel` 是本 run 专用的审批通道（Web 外壳每 run 建一个，
+        因为 SSE 连接每 run 一条）；不传则用构造时给的（CLI 的交互通道）。
 
-        `sub_agent` 非空表示这是**子 run**（被父 run 委派）：生命周期事件
-        从 RUN_START / RUN_END 换成 SUB_RUN_START / SUB_RUN_END——
-        一条 trace 里只能有一个 run 的开始和结束，子 run 是其中的一段。
+        `sub_agent` 非空表示这是被父 run 委派的子 run：生命周期事件从
+        RUN_START / RUN_END 换成 SUB_RUN_START / SUB_RUN_END —— 一条
+        trace 里只能有一个 run 的开始和结束。
         """
         transcript = list(messages) if messages else []
         resumed = bool(transcript)
-        # 运行时上下文（会话 id / 输出目录）每轮注入 system：会话里存的是
-        # 完整 transcript，system 不落库，所以这里注入不会污染历史
+        # 运行时上下文（会话 id / 输出目录）每轮注入 system：会话存的是完整
+        # transcript，system 不落库，注入不会污染历史
         _ensure_system(
             transcript,
             self._system_prompt,
@@ -184,7 +164,7 @@ class AgentRuntime:
             run_id=emitter.run_id,
         )
 
-        # 子代理用量记账：列表而不是返回值，因为委派发生在 _run_tools 内部的
+        # 子代理用量记账：用列表而非返回值，因为委派发生在 _run_tools 内部的
         # 并行任务里；单个 run 内只有委派任务会追加，无并发写问题。
         sub_usage: list[Usage] = []
 
@@ -194,7 +174,7 @@ class AgentRuntime:
 
             async def report_runner(call: ToolCall) -> ToolResult:
                 # 参数校验在派发点做（与 ToolRegistry.execute 同一套 helper、
-                # 同一种可恢复错误文案）—— 模型缺 brief / path 时立刻拿到
+                # 同一种可恢复错误文案）：模型缺 brief / path 时立刻拿到
                 # 结构化反馈，而不是进了子代理才失败。
                 args, parse_error = _parse_arguments(call.arguments)
                 if parse_error is not None:
@@ -291,10 +271,9 @@ class AgentRuntime:
                         role="assistant",
                         content=response.text,
                         tool_calls=response.tool_calls or None,
-                        # Anthropic 的 thinking / redacted_thinking 块必须原样回传，
-                        # 否则续跑时 400。内核不解读它，只是搬一次 —— 这一句是
-                        # "两套协议一套内核"能成立的关键：多协议的差异全在客户端，
-                        # 内核只负责别把它弄丢。
+                        # Anthropic 的 thinking / redacted_thinking 块必须原样
+                        # 回传，否则续跑时 400。内核不解读它，只负责搬运：
+                        # 多协议差异全在客户端，内核别弄丢即可。
                         raw_blocks=response.raw_blocks,
                     )
                 )
@@ -303,7 +282,7 @@ class AgentRuntime:
                     EventType.ASSISTANT_MESSAGE,
                     turn=turn,
                     text=response.text,
-                    # id 必须进 journal：恢复时靠它把 tool_call 与结果对上账
+                    # id 必须进 journal：恢复时靠它把 tool_call 与结果对上
                     tool_calls=[
                         {"id": call.id, "name": call.name, "arguments": call.arguments}
                         for call in response.tool_calls
@@ -339,16 +318,16 @@ class AgentRuntime:
             )
 
         except asyncio.CancelledError:
-            # 取消也是一种**正常收尾**，不再向上抛：调用方（webapi / CLI）拿到
-            # 半成品 RunResult 才能把"用户已经看到一半的对话"落进会话。
-            # 取消的传播机制不变 —— 仍是 asyncio 任务取消逐层打断 LLM 流与工具，
-            # 只是终点从"异常退出"改成"带结果的退出"。
+            # 取消按正常收尾处理，不再向上抛：调用方（webapi / CLI）拿到半成品
+            # RunResult，才能把"用户已经看到一半的对话"落进会话。传播机制不变，
+            # 仍是 asyncio 任务取消逐层打断 LLM 流与工具，只是终点从异常退出
+            # 改为带结果的退出。
             stop_reason = "cancelled"
             emitter.emit(EventType.ERROR, kind="CancelledError", message="运行被取消")
             partial = "".join(streamed)
             if partial and not assistant_recorded:
-                # 正在流式输出的那句话还没入 transcript：把半截留住，
-                # 否则下次打开会话它就消失了（用户亲眼看过它）。
+                # 正在流式输出的那句话还没入 transcript：留住半截，否则下次
+                # 打开会话它就消失了。
                 transcript.append(Message(role="assistant", content=partial))
                 emitter.emit(EventType.ASSISTANT_MESSAGE, turn=turn, text=partial)
             emitter.emit(EventType.FINAL, text=partial, stop_reason=stop_reason)
@@ -393,22 +372,20 @@ class AgentRuntime:
     ) -> None:
         """执行这一轮声明的全部 tool_calls，并把结果回灌进 messages。
 
-        **检查串行、执行并行**：先按声明顺序逐个过熔断（guard 的状态是顺序
-        敏感的 —— 同一批里完全重复的调用，第二个就该被拦下），再过权限门
-        （ask 要等人答复，天然只能一个一个来），放行的调用经信号量限流后
-        并发执行（asyncio.gather）。
+        检查串行、执行并行：先按声明顺序逐个过熔断（guard 的状态顺序敏感，
+        同一批里完全重复的调用第二个就该被拦下），再过权限门（ask 要等人
+        答复，只能逐个进行），放行的调用经信号量限流后并发执行。
 
-        `write_report` 是唯一的非数据工具：它不过 ToolRegistry，由循环分发到
-        报告子代理（report_runner）。子代理内部是一个完整的嵌套 run，慢
-        （多轮 LLM + 写文件），所以**不吃** MAX_PARALLEL_TOOL_CALLS 信号量
-        —— 那把伞是给数据源的限流重试配的，罩不住一个子代理。
+        `write_report` 是唯一的非数据工具：不过 ToolRegistry，由循环分发到
+        报告子代理。子代理内部是完整的嵌套 run（多轮 LLM + 写文件），不吃
+        MAX_PARALLEL_TOOL_CALLS 信号量。
 
-        结果消息的回灌顺序只由**模型声明的顺序**决定，与完成先后无关：
-        TOOL_RESULT 事件随完成实时发出（前端按 tool_call_id 归位），
-        transcript 在全部落定后按声明顺序统一追加。
+        回灌顺序只由模型声明的顺序决定，与完成先后无关：TOOL_RESULT 事件
+        随完成实时发出（前端按 tool_call_id 归位），transcript 在全部落定
+        后按声明顺序统一追加。
 
-        **每个 tool_call 都必须回灌一条消息**，哪怕是拦下来的 ——
-        assistant 已经声明了这些调用，少一条就是协议非法。
+        每个 tool_call 都必须回灌一条消息，包括被拦下的 —— assistant 已
+        声明这些调用，少一条即协议非法。
         """
         semaphore = asyncio.Semaphore(MAX_PARALLEL_TOOL_CALLS)
 
@@ -417,9 +394,9 @@ class AgentRuntime:
                 result = await self._tools.execute(
                     call, timeout_s=self._settings.tool_timeout_s, run_id=emitter.run_id
                 )
-            # record 只改内存 dict、无 await，事件循环内天然原子，不会丢更新。
-            # 并行批内同工具"一败一成"时计数按完成顺序落 —— 并发下"连续"
-            # 本无全序，偏差方向只会偏保守（早拦一次），不会偏失控（见 guard.py）
+            # record 只改内存 dict、无 await，事件循环内天然原子。
+            # 并行批内同工具"一败一成"时按完成顺序记账：并发下"连续"本无
+            # 全序，偏差偏保守（早拦一次），不会偏失控（见 guard.py）。
             guard.record(call, ok=result.ok)
             _emit_tool_result(emitter, turn=turn, call=call, result=result)
             return result
@@ -431,9 +408,9 @@ class AgentRuntime:
             _emit_tool_result(emitter, turn=turn, call=call, result=result)
             return result
 
-        # 阶段一（串行）：声明顺序过熔断、过权限门，放行的立刻起任务。
-        # 这里可能有 await（审批等人），取消时要把已起的任务收掉，
-        # 否则它们会变成脱离本 run 的孤儿。
+        # 阶段一（串行）：按声明顺序过熔断、过权限门，放行的立即起任务。
+        # 此处可能有 await（审批等待），取消时要收掉已起的任务，否则它们
+        # 会成为脱离本 run 的孤儿。
         plans: list[tuple[ToolCall, asyncio.Task | None, Message | None]] = []
         try:
             for call in response.tool_calls:
@@ -444,7 +421,7 @@ class AgentRuntime:
 
                 breaker = guard.check(call)
                 if breaker is not None:
-                    # 熔断：不执行，但照样回灌。内容写成"别再试了，改走别的路"。
+                    # 熔断：不执行，但照样回灌，内容提示模型改走别的路。
                     emitter.emit(
                         EventType.CIRCUIT_BREAK,
                         turn=turn,
@@ -466,9 +443,9 @@ class AgentRuntime:
                     ))
                     continue
 
-                # write_report 是内核级虚拟工具，不在 registry 里 —— 它的
-                # 能力声明（write_local）由循环直接给出，否则 capabilities()
-                # 会按"查无此工具"退化成只读，权限门将永远放行。
+                # write_report 不在 registry 里，能力声明（write_local）由
+                # 循环直接给出：否则 capabilities() 会按"查无此工具"退化为
+                # 只读，权限门将永远放行。
                 capabilities = (
                     REPORT_CAPABILITIES
                     if call.name == REPORT_TOOL_NAME
@@ -476,8 +453,8 @@ class AgentRuntime:
                 )
                 blocked = await gate.check(call, capabilities, turn=turn)
                 if blocked is not None:
-                    # 被权限门拦下（deny / 用户拒绝）：不执行，照样回灌。
-                    # 内容写成"不要再尝试"—— 否则模型会换个参数反复重试。
+                    # 被权限门拦下（deny / 用户拒绝）：不执行，照样回灌，
+                    # 内容提示不要再尝试 —— 否则模型会换个参数反复重试。
                     plans.append((
                         call,
                         None,
@@ -503,9 +480,9 @@ class AgentRuntime:
                     task.cancel()
             raise
 
-        # 阶段二（并行）：等全部放行的调用落定。execute() 内部已把工具错误
-        # 转成 ok=False 的结果，能从这里冒出来的异常都是内部错误 —— 语义与
-        # 串行版一致（终止 run）。先等全部子任务结束再抛，不留孤儿任务。
+        # 阶段二（并行）：等待全部放行的调用落定。execute() 已把工具错误
+        # 转成 ok=False，能在这里冒出来的都是内部错误（终止 run）。先等
+        # 全部子任务结束再抛，不留孤儿任务。
         running = [task for _, task, _ in plans if task is not None]
         if running:
             outcomes = await asyncio.gather(*running, return_exceptions=True)
@@ -541,8 +518,8 @@ class AgentRuntime:
     ) -> LLMResponse:
         specs = self._tools.specs() if allow_tools else []
         if allow_tools and self._report_delegate is not None:
-            # write_report 的 spec 由循环动态注入（它不在 registry 里）——
-            # 没装配 ReportDelegate 时模型根本看不到这个工具
+            # write_report 不在 registry 里，spec 由循环动态注入；未装配
+            # ReportDelegate 时模型看不到这个工具
             specs = [*specs, REPORT_TOOL_SPEC]
 
         def on_text(chunk: str) -> None:
@@ -563,11 +540,11 @@ class AgentRuntime:
 
 
 def _emit_tool_result(emitter: EventEmitter, *, turn: int, call: ToolCall, result) -> None:
-    """ARTIFACT + TOOL_RESULT 两个事件。
+    """发出 ARTIFACT + TOOL_RESULT 两个事件。
 
-    完整结果原文进 journal（恢复对账用）；SSE 帧会把 content 剔掉（webapi），
-    前端只用 preview。落盘时"进上下文的字符数"远小于原始规模 —— 两者都要报，
-    否则看 trace 的人会以为"这个工具只返回了几百字符"。
+    完整结果原文进 journal（恢复对账用）；SSE 帧会剔掉 content（webapi），
+    前端只用 preview。落盘时进上下文的字符数远小于原始规模，两者都要报，
+    否则看 trace 会误以为工具只返回了几百字符。
     """
     artifact = result.meta.get("artifact")
     if artifact:
@@ -597,12 +574,11 @@ def _emit_tool_result(emitter: EventEmitter, *, turn: int, call: ToolCall, resul
 def _ensure_system(messages: list[Message], system_prompt: str, note: str = "") -> None:
     """保证首条是 system。
 
-    会话里**不存 system 消息**，每次由 runtime 注入最新的那份 ——
-    这样改了 prompt 立刻对老会话生效，prompt 版本化才有意义。
+    会话不存 system 消息，每次由 runtime 注入最新的一份：改了 prompt 立刻
+    对老会话生效，prompt 版本化才有意义。
 
-    `note` 是运行时上下文（当前会话 id / 输出目录），跟在正式 prompt 后面。
-    它也必须每轮重算：同一会话的下一轮 run 拿到的还是这份，但 run 目录
-    （无会话时）每次都不同。
+    `note` 是运行时上下文（会话 id / 输出目录），跟在正式 prompt 后面，
+    每轮重算：无会话时 run 目录每次都不同。
     """
     content = f"{system_prompt}\n\n{note}" if note else system_prompt
     if messages and messages[0].role == "system":
@@ -614,8 +590,8 @@ def _ensure_system(messages: list[Message], system_prompt: str, note: str = "") 
 def _runtime_note(session_id: str | None, run_id: str) -> str:
     """每轮注入给模型的运行时上下文。
 
-    输出目录必须由系统给出、不让模型猜：写文件的路径判定（放行 / 询问 /
-    拒绝）是确定性的，模型把目录猜错 = 白白弹一次审批。
+    输出目录由系统给出、不让模型猜：写文件的路径判定（放行 / 询问 / 拒绝）
+    是确定性的，模型猜错目录会白白触发一次审批。
     """
     scope = session_scope_dir(session_id, run_id)
     who = session_id or "无（一次性提问）"
@@ -629,14 +605,14 @@ def _runtime_note(session_id: str | None, run_id: str) -> str:
 
 
 def _repair_transcript(messages: list[Message]) -> int:
-    """把被中断的 transcript 修回协议合法的状态，返回补了几条。
+    """把被中断的 transcript 修回协议合法状态，返回补齐的条数。
 
     破损只有一种形态：最后一条 assistant 声明了 tool_calls，但对应的 tool
-    结果不全（进程被杀 / 用户取消 / 异常中断）。两个协议都不接受这种结尾，
-    所以续跑前必须补齐。
+    结果不全（进程被杀 / 取消 / 异常中断）。两个协议都不接受这种结尾，
+    续跑前必须补齐。
 
-    关键在补齐的**内容**：判定为"结果未知"，而不是"失败"。工具可能已经
-    把请求发出去了 —— 对只读行情无所谓，对写类工具，盲目重试就是事故。
+    补齐的内容判定为"结果未知"而非"失败"：工具可能已把请求发出去，盲目
+    重试对写类工具就是事故。
     """
     last_assistant: int | None = None
     for index in range(len(messages) - 1, -1, -1):

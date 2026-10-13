@@ -1,8 +1,8 @@
 """本地 Web 服务层：把内核事件流变成 HTTP + SSE。
 
-与 cli.py 完全同构的"外壳"：装配 → 开 run → 把 EventEmitter 的事件
-转成自己的输出格式（CLI 转 ANSI 文本，这里转 SSE 帧）。
-内核不 import FastAPI —— "内核不知道 UI 存在"（architecture.md 7.7）在这里兑现。
+与 cli.py 完全同构的"外壳"：装配 → 开 run → 把 EventEmitter 的事件转成
+自己的输出格式（CLI 转 ANSI 文本，这里转 SSE 帧）。内核不 import FastAPI
+—— "内核不知道 UI 存在"在这里兑现。
 
 ## 协议
 
@@ -15,7 +15,7 @@
 
 ## 并发与安全
 
-- **按会话隔离并发**：同一会话同时只允许一个 run（409），不同会话可并行；
+- 按会话隔离并发：同一会话同时只允许一个 run（409），不同会话可并行；
 - 每帧事件注入 session_id，前端据此路由到对应会话的视图；
 - 只绑 127.0.0.1，并校验 Host 头（防 DNS rebinding）；
 - API Key 不经 HTTP 传输——服务端从 env / config.toml 自己读。
@@ -62,7 +62,7 @@ class WebApprovalChannel:
     agent 永久挂起。超时决定与用户拒绝一样进 trace（by="timeout"）。
 
     **幂等**：同一 request_id 只接受第一个答复，重复 POST 返回 False
-    （7.14 第 6 条 —— 用户点两次"批准"不能执行两次）。
+    （用户点两次"批准"不能执行两次）。
     """
 
     def __init__(self, timeout_s: float = 120.0) -> None:
@@ -94,10 +94,11 @@ _APPROVALS: dict[str, WebApprovalChannel] = {}
 
 
 def web_dir() -> Path | None:
-    """前端静态文件目录。NIULAI_WEB_DIR 可覆盖；默认自动定位仓库里的 apps/desktop/web。
+    """前端静态文件目录。NIULAI_WEB_DIR 可覆盖；默认自动定位仓库里的
+    apps/desktop/web。
 
-    可编辑安装下 __file__ 指向真实源码，向上 5 级即仓库根；
-    正式打包（P6）后路径由安装器布局决定，届时再改成资源目录。
+    可编辑安装下 __file__ 指向真实源码，向上 5 级即仓库根；正式打包后
+    路径由安装器布局决定，届时再改成资源目录。
     """
     override = os.environ.get("NIULAI_WEB_DIR", "").strip()
     if override:
@@ -157,7 +158,7 @@ _ALLOWED_HOSTS = {"127.0.0.1", "localhost", "testserver", "testserver.local"}
 
 
 def _find_interrupted_journal(session_id: str) -> tuple[Path, dict[str, Any]] | None:
-    """该会话最近一次**未收尾** run 的 journal（§7.13 恢复数据源）。
+    """该会话最近一次未收尾 run 的 journal（恢复数据源）。
 
     只看最新一条匹配的 run：如果它已正常收尾，更早的中断也视为过期 ——
     恢复必须发生在对话末尾，往历史中间插消息会破坏顺序。
@@ -238,8 +239,8 @@ def _history_view(messages: list[Any]) -> list[dict[str, Any]]:
 
 def create_app() -> FastAPI:
     # 装配缓存：key 是 (Settings, 同花顺 Key)。配置没变 → 复用同一份装配
-    # （LLM 的 httpx 连接池、将来 P3 的限流器 / 结果缓存，都是只有跨请求
-    # 共享才成立的全局状态——每请求新建等于让它们失效）；配置变了（PUT
+    # （LLM 的 httpx 连接池、限流器 / 结果缓存，都是只有跨请求共享才成立的
+    # 全局状态——每请求新建等于让它们失效）；配置变了（PUT
     # /api/config 或 env）→ 新 key 自然 miss，重建即可，"保存后即生效"
     # 的动态刷新语义不受影响。同花顺 Key 不在 Settings 里（它决定数据源
     # 装配，而不是 LLM 装配），所以要单独进缓存键 —— 否则界面里配了 Key
@@ -594,7 +595,7 @@ def create_app() -> FastAPI:
     async def api_permission(run_id: str, body: PermissionDecision):
         """答复一个等待中的审批（前端审批弹窗的"允许 / 总是允许 / 拒绝"）。
 
-        409 = 已答复过或已超时——重复 POST 不执行第二次（幂等，7.14 第 6 条）。
+        409 = 已答复过或已超时——重复 POST 不执行第二次（幂等）。
         """
         channel = _APPROVALS.get(run_id)
         if channel is None:

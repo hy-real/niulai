@@ -1,6 +1,6 @@
-"""MCP server 入口（P9 实现）。
+"""MCP server 入口（占位，未实现）。
 
-计划暴露的工具（直接复用 `niulai.datasource`，不重复写取数逻辑）：
+计划暴露的工具（直接复用 niulai.datasource，不重复写取数逻辑）：
 
 | 工具 | 说明 |
 | --- | --- |

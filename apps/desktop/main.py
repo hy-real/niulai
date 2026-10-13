@@ -8,7 +8,7 @@
 - macOS 用 WKWebView。注意 webview.start() 必须占用主线程（macOS 要求），
   所以服务放在守护线程里跑；窗口关闭 → start() 返回 → 进程退出，
   守护线程随之结束（等同关掉了服务，在跑的任务会被放弃——与 CLI 的
-  Ctrl-C 行为一致；优雅挂起等 P4 的 run journal）。
+  Ctrl-C 行为一致；优雅挂起依赖 run journal 恢复机制）。
 
 运行：pip install pywebview 后 `python apps/desktop/main.py`
 """

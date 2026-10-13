@@ -1,10 +1,8 @@
 """OpenAI 兼容协议的流式客户端。
 
-只依赖 httpx，不装各家 SDK —— 因为 DeepSeek / 通义 / 混元 / Kimi / OpenAI
-都实现了同一套 `/chat/completions`，一个客户端就够。
-
-裸 HTTP 还带来两个好处：token 用量和错误码都看得见，
-不会像框架那样把 token 记账藏在抽象后面。
+只依赖 httpx，不装各家 SDK —— DeepSeek / 通义 / 混元 / Kimi / OpenAI 都
+实现了同一套 /chat/completions，一个客户端就够。裸 HTTP 还让 token 用量
+和错误码都看得见。
 """
 
 from __future__ import annotations
@@ -119,7 +117,7 @@ class OpenAICompatClient:
     ) -> LLMResponse:
         """流式调用，返回聚合后的结果。
 
-        重试策略：**只在还没吐出任何文本时重试。**
+        重试策略：只在还没吐出任何文本时重试。
         一旦已经有内容流给用户，再重试就会重复输出 —— 那种情况不如直接失败。
         """
         return await stream_with_retry(
@@ -223,7 +221,7 @@ def strip_leaked_chunk_json(content: str | None) -> str | None:
     会把内部的流式 delta 块原样拼进正文末尾，形如
     `好的，我来查一下{"index":0,"finish_reason":"tool_calls","delta":{...}}`。
 
-    只在**末尾那段确实能解析成流式 chunk 结构**时才剔除，所以用户让模型
+    只在末尾那段确实能解析成流式 chunk 结构时才剔除，所以用户让模型
     正常输出 JSON 时不会被误删。
 
     注意它只清洗最终聚合结果：已经流到终端上的那几个字符收不回来。

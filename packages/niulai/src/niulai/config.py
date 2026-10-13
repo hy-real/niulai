@@ -1,30 +1,26 @@
 """运行时配置。
 
-## 优先级（高 → 低），与 git / aws cli / gh 同一惯例
+优先级（高 → 低），与 git / aws cli 同惯例：
 
-    CLI 参数  >  环境变量  >  ~/.niulai/config.toml  >  内置默认值
+    CLI 参数 > 环境变量 > ~/.niulai/config.toml > 内置默认值
 
 作用域匹配生命周期：config.toml 是"这台机器的常态"，env 是"这个终端的
 临时意图"——`NIULAI_PROTOCOL=anthropic niulai ask "..."` 这种临时切换
 必须赢过文件，否则试个协议还得改文件。
 
-## API Key 的来源与优先级
+API Key 的来源与优先级：环境变量 > config.toml 里的 api_key。单机本地
+使用，文件就在用户自己机器上，读文件没什么危险——所以文件里的 api_key
+也认，只是排 env 后面。将来如需多用户 / 共享环境再接系统凭据管理器
+keyring。
 
-    环境变量  >  config.toml 里的 api_key
-
-单机本地使用，文件就在用户自己机器上，读文件没什么危险——
-所以文件里的 api_key 也认，只是排 env 后面（env 是"这个终端的
-临时意图"，应当赢过"这台机器的常态"）。将来如需多用户/共享
-环境再接系统凭据管理器 keyring，见 architecture.md 12。
-
-协议怎么选（按顺序取第一个命中的）：
-1. CLI `--protocol` / 环境变量 NIULAI_PROTOCOL / 文件里的 protocol；
-2. 没写，但 base_url（env 或文件）里含 `anthropic` → anthropic；
+协议推断（按顺序取第一个命中的）：
+1. CLI --protocol / 环境变量 NIULAI_PROTOCOL / 文件里的 protocol；
+2. 没写，但 base_url（env 或文件）里含 anthropic → anthropic；
 3. 没写，但只提供了 ANTHROPIC_API_KEY → anthropic；
 4. 其余 → openai（兼容面最广，DeepSeek / 通义 / 混元 / Kimi / OpenAI 都走它）。
 
-不确定协议时别硬填：填错的表现是"HTTP 404"或"model not found"，
-而不是一句能看懂的中文提示。
+不确定协议时别硬填：填错的表现是"HTTP 404"或"model not found"，而不是
+一句能看懂的中文提示。
 """
 
 from __future__ import annotations

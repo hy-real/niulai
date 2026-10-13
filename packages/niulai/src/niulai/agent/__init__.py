@@ -1,7 +1,7 @@
 """Agent 内核。
 
 对外只暴露 `AgentRuntime` 与 `RunResult`。
-`scheduler`（自选股 / 预警 / 盘后复盘）会作为同级模块加在 P7。
+`scheduler`（自选股 / 预警 / 盘后复盘）会作为同级模块加入。
 """
 
 from .loop import AgentRuntime, RunResult

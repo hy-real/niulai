@@ -1,16 +1,14 @@
-"""LLM 层的公共类型 —— 一套**协议无关**的中间表示（IR）。
+"""LLM 层的公共类型 —— 一套协议无关的中间表示（IR）。
 
-这里的类型刻意不绑定任何厂商的线格式。序列化（怎么变成 HTTP body）是
-各客户端自己的事，放在 `openai_compat.py` / `anthropic.py` 里，
-**不要放回这一层**。
+这里的类型刻意不绑定任何厂商的线格式。序列化（怎么变成 HTTP body）是各
+客户端自己的事，放在 openai_compat.py / anthropic.py 里，不要放回这一层。
 
-为什么不能给 `Message` 挂一个 `to_wire()`？因为 Anthropic 那种协议需要
-**跨消息重组**：system 要提到顶层参数、连续的 tool_result 要合进同一条
-user 消息。per-message 的方法表达不了这种"跨消息"的约束 —— 所以转换
-必须由客户端握着整个消息列表来做。这不是洁癖，是被协议逼出来的。
+不给 Message 挂 to_wire()：Anthropic 协议需要跨消息重组（system 提到
+顶层参数、连续的 tool_result 合进同一条 user 消息），per-message 的方法
+表达不了这种约束 —— 转换必须由客户端握着整个消息列表来做。
 
-`raw_blocks` 是留给"模型吐出来、但必须原样送回去"的不透明块
-（Anthropic 的 thinking / redacted_thinking）。内核不解读它，只负责搬运。
+raw_blocks 是留给"模型吐出来、但必须原样送回去"的不透明块（Anthropic 的
+thinking / redacted_thinking）。内核不解读它，只负责搬运。
 """
 
 from __future__ import annotations

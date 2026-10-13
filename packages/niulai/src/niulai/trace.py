@@ -1,23 +1,22 @@
 """Run trace：每行一个事件的 JSONL。
 
-为什么值得单独做一层：
+值得单独做一层的原因：
 
-1. **调试** —— 出问题不用重跑，直接看轨迹；
-2. **演示** —— 不填 API Key 也能回放一次真实运行（README 的 GIF 就是这么录的）；
-3. **面试** —— 能拿出真实运行记录，讲清楚每一步为什么这么走；
-4. **恢复（P4）** —— 它同时是 run journal：进程被杀后从这里重建 transcript 续跑。
+1. 调试 —— 出问题不用重跑，直接看轨迹；
+2. 演示 —— 不填 API Key 也能回放一次真实运行；
+3. 恢复 —— 它同时是 run journal：进程被杀后从这里重建 transcript 续跑。
 
-trace 里**绝不能出现 API Key**：build 事件时只放模型名与用量，不放请求头。
+trace 里绝不能出现 API Key：build 事件时只放模型名与用量，不放请求头。
 
 ## `seq` 会有空洞，这是对的
 
-`seq` 是**事件流里的全局序号**，在 `EventEmitter.emit` 那一刻分配。
-而 trace 是这条流的一个**投影** —— `text_delta` 这类纯 UI 事件被过滤掉了，
-所以文件里的 seq 可能是 `1, 2, 4, 5, …`。
+`seq` 是事件流里的全局序号，在 EventEmitter.emit 那一刻分配。而 trace 是
+这条流的一个投影 —— text_delta 这类纯 UI 事件被过滤掉了，所以文件里的
+seq 可能是 `1, 2, 4, 5, …`。
 
-不要为了"看起来整齐"去重新编号：那样 trace 的 seq 就和实时订阅者
-（CLI / SSE 客户端）看到的对不上了，两边日志没法对照着查问题。
-判断完整性看 **seq 严格递增且无重复**，而不是看它连不连续。
+不要为了"看起来整齐"去重新编号：那样 trace 的 seq 就和实时订阅者（CLI /
+SSE 客户端）看到的对不上了，两边日志没法对照着查问题。判断完整性看
+seq 严格递增且无重复，而不是看它连不连续。
 """
 
 from __future__ import annotations
@@ -79,8 +78,8 @@ class TraceWriter:
 def read_trace(path: Path) -> Iterator[dict[str, Any]]:
     """逐行读回一个 trace 文件。
 
-    进程被杀时最后一行可能只写了一半（见 architecture.md 7.13），
-    所以残缺行要跳过而不是让整个回放崩掉 —— 与 session.py 读取会话同一个原则。
+    进程被杀时最后一行可能只写了一半，所以残缺行要跳过而不是让整个回放
+    崩掉 —— 与 session.py 读取会话同一个原则。
     """
     with Path(path).open("r", encoding="utf-8") as fh:
         for line in fh:
@@ -122,14 +121,14 @@ def resolve_run(ref: str, directory: Path | None = None) -> Path:
 
 
 def load_transcript(path: Path) -> ResumePlan:
-    """从 journal 重建一次（可能被中断的）run 的 transcript —— §7.13 的恢复数据源。
+    """从 journal 重建一次（可能被中断的）run 的 transcript（恢复数据源）。
 
     重建规则：journal 是事件流的忠实投影（每条消息 append 与 emit 同步发生），
     所以按事件顺序拼回即得原 transcript。四种事件有用：
 
     - run_start        → user 消息（task）
     - assistant_message → assistant 消息（带 tool_calls 时的 id 是对账键）
-    - tool_result      → tool 消息（content 是**完整**结果，恢复必需）
+    - tool_result      → tool 消息（content 是完整结果，恢复必需）
     - circuit_break    → tool 消息（被拦下的调用也回灌了结果，同样要拼回）
 
     两个协议不接受"声明了 tool_call 却没有结果"的结尾。进程死在执行中途时，

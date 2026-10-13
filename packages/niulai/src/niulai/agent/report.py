@@ -1,33 +1,23 @@
 """报告子代理：把"写报告"从主对话里剥出去，委派给一个嵌套的 run。
 
-## 为什么值得一个子代理（而不是让主代理 inline 写）
+值得一个子代理（而非主代理 inline 写）的理由：
 
-1. **上下文卫生。** inline 写时，整篇报告文本以 `tool_call.arguments` 的形式
-   永远留在主 transcript 里，之后每一轮的 `fit_context` 都要带着它走。
-   委派之后，主会话里只留一句"已写入 path（N 字符）"，报告本体在磁盘上，
-   要读用 `read_file`。brief（分析结论）只存在一份——在委派参数里，
-   而那段文字主代理本来就要写。
-2. **prompt 独立版本化。** 报告的规矩（结构、引用、命名、读回自查）单独一份
-   `system_report_v1.md`，可以独立调优、独立进 eval，不用把主 prompt
-   撑成合订本。
-3. **预算与权限隔离。** 子 run 有自己的轮数上限（默认 6），工具面收窄成
-   「只读数据工具 + read_file + write_file」—— least privilege 有了一个
-   能演示的实例，也和刚落地的权限引擎（permissions.py）天然衔接：
-   子代理的每一次 `write_file` 都过同一道门、同一个审批通道。
+1. 上下文卫生。inline 写时整篇报告以 tool_call.arguments 的形式永远留在
+   主 transcript 里，之后每轮 fit_context 都要带着它走。委派后主会话只留
+   一句"已写入 path（N 字符）"，报告本体在磁盘上，要读用 read_file。
+2. prompt 独立版本化。报告的规矩（结构、引用、命名、读回自查）单独一份
+   system_report_v1.md，可独立调优、独立进 eval。
+3. 预算与权限隔离。子 run 有自己的轮数上限，工具面收窄为「只读数据工具
+   + read_file + write_file」，每次 write_file 都过同一道权限门。
 
-## 为什么不是"多 Agent 编排"
+这不是"多 Agent 编排"：一个固定用途、同步调用、工具形态的子代理，编排
+逻辑就是循环里的一次分发。同一个委派机制将来可服务盘后复盘等场景，
+所以 ReportDelegate 的形态保持通用：一份 prompt + 一个工具工厂 + 一个
+预算。
 
-这是**一个固定用途、同步调用、工具形态**的子代理：没有 planner spawn 任意
-agent，没有 A2A，编排逻辑就是循环里的一次分发。architecture.md §11 的判据
-（多 Agent 是特定问题的答案）在这里成立——报告恰好是那个特定问题。
-同一个委派机制将来服务 P7 的盘后复盘（换 spec / prompt / 工具面即可），
-所以 `ReportDelegate` 的形态刻意保持通用：一份 prompt + 一个工具工厂 + 一个预算。
-
-## 数据交接的取舍（已定）
-
-brief 优先、缺的子代理自己取：它拿得到只读数据工具，prompt 规定"不得与
-brief 矛盾、补取的数据要注明工具名与取数时间"。这样报告的"数据来源"一节
-能带真实的 `as_of`，而不是把对话里的旧数字再抄一遍。
+数据交接：brief 优先，缺的子代理自己取。它拿得到只读数据工具，prompt
+规定"不得与 brief 矛盾、补取的数据要注明工具名与取数时间"，报告的
+"数据来源"一节因此能带真实的 as_of。
 """
 
 from __future__ import annotations
@@ -47,8 +37,8 @@ from ..permissions import ApprovalChannel, ApprovalMemory
 from ..tools import Tool, ToolRegistry
 from .prompt import REPORT_PROMPT, load_prompt
 
-if TYPE_CHECKING:  # 延迟导入：loop 反向依赖本模块（分发 write_report），
-    from .loop import RunResult  # 模块级互导会成环
+if TYPE_CHECKING:  # 延迟导入：loop 反向依赖本模块（分发 write_report），模块级互导会成环
+    from .loop import RunResult
 
 REPORT_TOOL_NAME = "write_report"
 REPORT_AGENT_NAME = "report"
@@ -100,9 +90,9 @@ REPORT_TOOL_SPEC = ToolSpec(
 class ReportDelegate:
     """主 run 持有的委派器。
 
-    `build_tools` 是工具工厂而不是现成列表：子代理的工具面要按**调用时**的
-    数据目录构造（`WriteFileTool` 的围栏根在构造时解析），且每次委派都该拿
-    全新实例——工具对象不该跨 run 复用（状态污染）。
+    `build_tools` 是工具工厂而不是现成列表：子代理的工具面要按调用时的
+    数据目录构造（WriteFileTool 的围栏根在构造时解析），且每次委派都该拿
+    全新实例 —— 工具对象不该跨 run 复用（状态污染）。
     """
 
     build_tools: Callable[[Path], list[Tool]]
@@ -132,8 +122,8 @@ async def run_report(
     from .loop import AgentRuntime  # 延迟导入，见模块头 TYPE_CHECKING 注释
 
     data_root = data_dir()
-    # 子代理自己的一份 store：root 在调用时解析（与父同级目录）。
-    # 数据工具的大结果照旧落盘 + read_file 读回——子代理不享受"截断"待遇。
+    # 子代理自己的一份 store：root 在调用时解析（与父同级目录）。数据工具的
+    # 大结果照旧落盘 + read_file 读回——子代理不享受"截断"待遇。
     store = ArtifactStore()
     tools = ToolRegistry(delegate.build_tools(data_root), artifact_store=store)
     runtime = AgentRuntime(

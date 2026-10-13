@@ -1,12 +1,11 @@
 """数据源抽象。
 
-核心约束：**工具不认识具体数据源。**
+核心约束：工具不认识具体数据源。工具只调 MarketDataService，Service 按
+capability 挑源 —— "换数据源"= 加一个实现类 + 改一行配置，而不是动工具
+代码。
 
-工具只调 `MarketDataService`，Service 按 capability 挑源。
-于是"换数据源"= 加一个实现类 + 改一行配置，而不是去动工具代码。
-
-字段单位约定（贯穿全项目，别在某一层偷偷换算）：
-价格 = 元，成交量 = 手，成交额 = 元，比率 = 百分数（`-0.36` 表示 -0.36%）。
+字段单位约定（贯穿全项目，任何一层不做私自换算）：价格 = 元，成交量 = 手，
+成交额 = 元，比率 = 百分数（-0.36 表示 -0.36%）。
 """
 
 from __future__ import annotations
@@ -156,7 +155,7 @@ ADJUST_LABEL = {"none": "不复权", "forward": "前复权", "backward": "后复
 
 @dataclass(slots=True)
 class FinancialPeriod:
-    """一期主要财务指标。缺失字段一律 None，**不要用 0 冒充缺失**。"""
+    """一期主要财务指标。缺失字段一律 None，不要用 0 冒充缺失。"""
 
     period: str  # 如「2026中报」
     report_date: str
@@ -638,7 +637,7 @@ def _pct_raw(value: float | None) -> str:
 
 
 def guess_market_prefix(code: str) -> str:
-    """按代码首位猜交易所前缀。猜不出来就让用户写 sh / sz 前缀，不要瞎猜。"""
+    """按代码首位猜交易所前缀；猜不出来就要求调用方给出 sh / sz 前缀。"""
     if code[0] in "569":
         return "sh"
     if code[0] in "0123":
@@ -647,10 +646,10 @@ def guess_market_prefix(code: str) -> str:
 
 
 def to_market_code(symbol: str) -> str:
-    """'600519' / 'sh600519' → 'sh600519'，腾讯 / 新浪共用。
+    """'600519' / 'sh600519' → 'sh600519'，腾讯源共用。
 
     名称解析（「茅台」→ 600519）只有东财有；不支持名称的兜底源收到名称时
-    在这里显式抛错，由路由层降级到东财 —— 不要瞎猜。
+    在这里显式抛错，由路由层降级到东财。
     """
     raw = symbol.strip()
     if not raw:

@@ -2,9 +2,9 @@
 
 两个重点：
 
-1. **stdout 纯洁性。** `--json` 模式的 stdout 是事件流管道，日志只能去 stderr。
+1. stdout 纯洁性。`--json` 模式的 stdout 是事件流管道，日志只能去 stderr。
    埋点本身散在各层测不到，这里锁的是 setup 的行为。
-2. **级别解析要宽容。** 配置打错字（`NIULAI_LOG_LEVEL=DEBUGG`）不该挂掉，
+2. 级别解析要宽容。配置打错字（`NIULAI_LOG_LEVEL=DEBUGG`）不该挂掉，
    退回 warning。
 """
 

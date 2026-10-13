@@ -1,31 +1,22 @@
 """会话：跨多次 run 的对话历史。
 
-## 为什么单独一层
+内核的单位是 run（一次任务），用户要的单位是会话（一串对话）。把两者塞成
+一个会出两种问题：要么内核被迫知道"用户是谁、上次聊到哪"，要么会话被写成
+"每轮丢掉历史"的假象 —— 后者表现是"越聊越笨"：第二轮问"它今天成交多少"，
+模型根本不知道"它"指谁。
 
-内核的单位是 **run**（一次任务），用户要的单位是 **会话**（一串对话）。
-把一个塞进另一个会出两种问题：要么内核被迫知道"用户是谁、上次聊到哪"，
-要么会话被写成"每轮丢掉历史"的假象 —— 后者更常见，表现是"越聊越笨"：
-第二轮问"它今天成交多少"，模型根本不知道"它"指谁。
+存储的与发送的不是同一份：`Session.messages` 是完整 transcript（含全部
+工具结果原文），发给模型的是 context.fit_context() 裁出来的视图。这个
+不对称是故意的：存储要够完整才能恢复、回放、审计；发送要够小才烧得起
+token。为了省 token 把存储也裁了，"压缩"就变成了不可逆的丢数据。
 
-## 存储的与发送的不是同一份
+存储：SQLite 单文件 `~/.niulai/niulai.db`（单文件、零运维、stdlib 自带）：
 
-`Session.messages` 是**完整** transcript（含全部工具结果原文），
-发给模型的是 `context.fit_context()` 裁出来的**视图**。
-
-这个不对称是故意的：存储要够完整才能恢复、回放、审计；
-发送要够小才烧得起 token。如果为了省 token 把存储也裁了，
-那"压缩"就变成了"不可逆的丢数据"。
-
-## 存储：SQLite 单文件
-
-P4 起会话存进 `~/.niulai/niulai.db`（SQLite：单文件、零运维、stdlib 自带）：
-
-- 每条消息一个 `payload` JSON —— **往返不丢东西**：`tool_calls` 和
-  `raw_blocks` 少一样，恢复出来的 transcript 就发不出去
-  （Anthropic 的 thinking 块缺了直接 400）；
-- 保存 = 整段重写（消息全删全插，单事务）。会话是单写者的
-  （webapi 按会话隔离并发，同一会话同时只有一个 run），
-  不需要更细的增量写。
+- 每条消息一个 payload JSON —— 往返不丢东西：tool_calls 和 raw_blocks 少
+  一样，恢复出来的 transcript 就发不出去（Anthropic 的 thinking 块缺了
+  直接 400）；
+- 保存 = 整段重写（消息全删全插，单事务）。会话是单写者的（webapi 按会话
+  隔离并发），不需要更细的增量写。
 """
 
 from __future__ import annotations
@@ -81,7 +72,7 @@ class SessionError(NiulaiError):
 
 @dataclass(slots=True)
 class Session:
-    """一条会话。`messages` 里**不含 system 消息** —— 那由 runtime 每次注入。"""
+    """一条会话。`messages` 里不含 system 消息 —— 那由 runtime 每次注入。"""
 
     id: str
     created_at: str

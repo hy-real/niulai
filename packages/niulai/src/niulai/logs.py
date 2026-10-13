@@ -1,27 +1,23 @@
 """标准库 logging 的最小接入。
 
-## 为什么用 logging，而不是多加一种事件
+已有事件流（events.py）+ trace JSONL 的定位是运行轨迹 —— 给 UI 和回放看
+的东西。调试要的是另一类信息：HTTP 发了什么、重试了几次、错误响应体长
+什么样。这类"过程性噪音"不进事件流（会污染回放），由标准库 logging 承担。
 
-项目已有事件流（events.py）+ trace JSONL，但它们的定位是**运行轨迹**——
-给 UI 和回放看的东西。而调试要的是另一类信息：HTTP 发了什么、重试了几次、
-错误响应体长什么样。这类"过程性噪音"不该进事件流（会污染回放），
-标准库 logging 正是干这个的。
+两条硬规矩：
 
-## 两条硬规矩
+1. 只写 stderr，绝不碰 stdout —— `niulai ask --json` 的 stdout 是事件流
+   管道，下游按行解析 JSON，混进一行日志就把下游弄坏了；
+2. API Key 永远不进日志 —— 埋点只记 model / url / 数量，不记请求头和
+   完整消息体。
 
-1. **只写 stderr，绝不碰 stdout。** `niulai ask --json` 的 stdout 是事件流
-   管道，下游按行解析 JSON——混进一行日志就把下游弄坏了。
-2. **API Key 永远不进日志。** 埋点时只记 model / url / 数量，不记请求头
-   和完整消息体。见 config.py 的同一原则。
-
-## 开关
+开关：
 
     NIULAI_LOG_LEVEL=DEBUG    # debug / info / warning / error，默认 warning
     NIULAI_LOG_FILE=路径       # 可选：显式指定日志文件
 
-日志文件：NIULAI_LOG_FILE 设了就用它；没设但级别开到了 INFO/DEBUG，
-自动落到 `~/.niulai/logs/niulai.log`（长调试不怕终端滚走）。
-默认 WARNING 时文件不存在、零噪音。
+日志文件：NIULAI_LOG_FILE 设了就用它；没设但级别开到 INFO/DEBUG，自动落
+~/.niulai/logs/niulai.log。默认 WARNING 时文件不存在、零噪音。
 """
 
 from __future__ import annotations

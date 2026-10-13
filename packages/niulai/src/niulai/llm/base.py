@@ -47,7 +47,7 @@ async def stream_with_retry(
     attempt_runner: Callable[[TextHandler], Awaitable[LLMResponse]],
     on_text: TextHandler | None,
 ) -> LLMResponse:
-    """只在**还没吐出任何正文**时重试。
+    """只在还没吐出任何正文时重试。
 
     一旦有内容已经流给用户，再重试就会重复输出 —— 那种情况不如直接失败。
     两个协议的重试策略完全一样，抽出来共用，免得改一处忘一处。

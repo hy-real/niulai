@@ -1,24 +1,19 @@
-"""读文件工具：单纯的读工具——给路径，分页读回。
+"""读文件工具：给路径，分页读回。
 
-**契约只有一种路径形式**：相对数据根 `~/.niulai/` 的路径（如
-`artifacts/<run_id>/stock_kline-3f9c1a2b.csv`、`sessions/xxx.json`）。
-系统发给模型的所有文件引用都是这个形式，模型照抄即可，无需理解任何
-内部目录结构。目录内的绝对路径也接受（归一化后同样过围栏）。
+契约：path 用相对数据根 ~/.niulai/ 的形式（如
+artifacts/<run_id>/stock_kline-3f9c1a2b.csv）。系统发给模型的所有文件
+引用都是这个形式，模型照抄即可，无需理解内部目录结构。目录内的绝对路径
+也接受（归一化后同样过围栏）。相对而非绝对：引用会存进会话 JSON，相对
+形式在数据目录搬家后依然有效，也不会把用户名写进 trace。
 
-为什么不是绝对路径：引用会被**存进会话 JSON**（工具结果文本是 transcript
-的一部分），相对形式在数据目录搬家后依然有效，也不会把用户名写进 trace。
-`~/.niulai` 是唯一且固定的根，相对它不存在歧义——歧义只出现在"有多个根"
-的时候，而这里只有一个。
+边界 = 数据目录。目录之内是程序自己生成的文件，读它不需要审批；目录之外
+属于用户的其他数据，一律拒绝（那类请求走审批通道，见 permissions.py）。
 
-边界 = 数据目录。目录之内是程序自己生成的文件（config 里没有 Key），
-读它不需要审批；目录之外属于用户的其他数据，**现在一律拒绝**——那类请求
-将来走审批通道（用户确认后执行，见 architecture.md 7.12 / 7.14）。
+ArtifactStore 在这里是旧引用兼容层：旧会话里存的引用是
+<run_id>/<文件名>（相对 artifacts 子目录），只有 store 认得。对模型
+不可见。
 
-`ArtifactStore` 在这里是**老会话兼容层**：旧版会话里存的引用是
-`<run_id>/<文件名>`（相对 artifacts 子目录），只有 store 认得。对模型
-不可见——它只会见到并抄写规范形式。
-
-能力声明是 `read`，**不含 `network`** —— 它不出网、不写盘。
+能力声明是 read，不含 network —— 它不出网、不写盘。
 """
 
 from __future__ import annotations
@@ -100,7 +95,7 @@ class ReadFileTool:
     def __init__(self, store: ArtifactStore, *, data_root: Path | None = None) -> None:
         self._store = store
         # 边界注入点：默认 ~/.niulai；将来策略引擎接管判定时，这里是
-        # "转成 permission_request 事件"的挂钩位（见 architecture.md 7.12）。
+        # "转成 permission_request 事件"的挂钩位（见 permissions.py）。
         self._data_root = data_root or data_dir()
         self.spec = ToolSpec(
             name=READ_FILE_TOOL_NAME,
@@ -216,7 +211,7 @@ def _paginate(text: str, offset: int, limit: int) -> tuple[str, int, int]:
 
 
 def _read_capped(path: Path, *, max_chars: int = _MAX_CHARS) -> str:
-    """读文本、封顶体量。坏字节用替换符顶替而不是炸——磁盘上的字节不归我们保证。"""
+    """读文本、封顶体量。坏字节用替换符而不是抛错——磁盘上的字节不归我们保证。"""
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         return fh.read(max_chars)
 

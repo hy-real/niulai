@@ -15,8 +15,8 @@
 - 资金流 / 高频数据是「端内专用」，外部 Key 调不了 —— moneyflow 能力
   仍由东财兜底，本源不声明它。
 
-单位约定（见 base.py，别在某一层偷偷换算）：THS 的成交量是**股**，
-本项目约定是**手**，换算发生在本层；金额一律元。
+单位约定（见 base.py，任何一层不做私自换算）：THS 的成交量是股，本项目
+约定是手，换算发生在本层；金额一律元。
 """
 
 from __future__ import annotations
@@ -506,7 +506,7 @@ class ThsDataSource:
     async def _get_json(self, url: str, params: dict[str, str], *, what: str) -> dict[str, Any]:
         """带重试的 GET。
 
-        与东财同一条原则：**可重试的才重试**。传输错误 / 429 / 5xx /
+        与东财同一条原则：可重试的才重试。传输错误 / 429 / 5xx /
         信封里的 4001、5xxx 重试；参数错、Key 错、权限错立即失败。
         """
         last_error: str = "未知错误"
@@ -778,7 +778,7 @@ def parse_financial(
     """利润表 + 资产负债表 → `FinancialSummary`。
 
     THS 给的是报表原文，FinancialSummary 里的比率字段（毛利率 / 净利率 /
-    资产负债率 / 同比）由本层从原文**确定性计算** —— 不是估算，公式固定。
+    资产负债率 / 同比）由本层从原文确定性计算 —— 不是估算，公式固定。
     缺失字段保持 None，不要用 0 冒充。
     """
     income_by_key = {(r.get("fiscal_year"), r.get("fiscal_period")): r for r in rows}

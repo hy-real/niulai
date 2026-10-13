@@ -1,7 +1,7 @@
 """上下文裁剪测试。
 
-最要紧的一条是**结构不能被破坏**：`tool_call` 和它的 `tool_result` 是一对，
-拆散就是非法请求。AgentForge 按"条"裁剪（`del history[:n]`）就是栽在这里。
+最要紧的一条是结构不能被破坏：`tool_call` 和它的 `tool_result` 是一对，
+拆散就是非法请求。按"条"裁剪（`del history[:n]`）就是栽在这里。
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """用假 transport 走完整 HTTP 路径的测试。
 
 上面的 `test_llm_protocols.py` 测的是纯转换逻辑；这一组补上它测不到的部分：
-**URL、请求头、请求体里的协议细节**。两套协议最容易出的错恰好都在这儿 ——
+URL、请求头、请求体里的协议细节。两套协议最容易出的错恰好都在这儿 ——
 认证头写错（Bearer vs x-api-key）、system 忘了提到顶层、把 OpenAI 的
 `function.parameters` 发给 Anthropic。
 

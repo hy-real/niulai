@@ -1,11 +1,8 @@
 """命令行入口。
 
-CLI 的定位是**内核的测试夹具 + 多轮体验的最小载体**，不是最终产品形态。
-最终形态是 P5 的本地 Web UI 和 P6 的桌面壳，但三种外壳吃的是**同一条事件流**，
-所以这里做的东西不会白做 —— 换外壳时内核一行都不用改。
-
-（"CLI 是测试夹具"这句在有了 `chat` 之后要打个补丁：
-多轮 + 会话持久化是真的在用，不是测试代码。但它仍然不承担最终 UI 的职责。）
+CLI 是内核的测试夹具 + 多轮体验的最小载体，不承担最终 UI 的职责（最终
+形态是本地 Web UI 与桌面壳）。几种外壳吃的是同一条事件流，换外壳时内核
+一行都不用改。
 
 子命令：
 
@@ -216,11 +213,11 @@ def _enable_windows_ansi() -> None:
 
 
 class CliApprovalChannel:
-    """终端审批通道：弹 y/n/a，交互式，**不设超时**。
+    """终端审批通道：弹 y/n/a，交互式，不设超时。
 
-    不设超时的理由：用户就在终端前，等待本身就是交互的一部分；要走开 /
-    无人值守的场景本来就不该用 CLI。Ctrl-C 取消整轮 = 拒绝（CancelledError
-    透传到内核，与点停止同一条链路）。
+    不设超时的理由：用户就在终端前，等待本身就是交互的一部分；无人值守
+    的场景本来就不该用 CLI。Ctrl-C 取消整轮 = 拒绝（CancelledError 透传
+    到内核，与点停止同一条链路）。
 
     `always`（本会话不再问）的记忆不在通道里 —— 它按会话跨 run 有效，
     住在 runtime 持有的 ApprovalMemory 中（见 permissions.py）。
@@ -287,8 +284,7 @@ def _assemble(
     def build_report_tools(data_root: Path) -> list[Any]:
         """报告子代理的工具面：只读数据 + read_file + write_file。
 
-        刻意比主代理窄 —— least privilege 的落地形状：会写盘的只有
-        write_file 一个，且过同一道权限门。
+        比主代理窄：会写盘的只有 write_file 一个，且过同一道权限门。
         """
         return [
             *build_stock_tools(service),
@@ -365,8 +361,8 @@ async def _run_turn(
     )
 
     if session is not None:
-        # system 不进会话：它由 runtime 每次注入最新版本，
-        # 这样改了 prompt 立刻对老会话生效（prompt 版本化才有意义）。
+        # system 不进会话：由 runtime 每次注入最新版本，改了 prompt 立刻
+        # 对老会话生效（prompt 版本化才有意义）。
         session.messages = [m for m in result.messages if m.role != "system"]
         session.note_run(run_id, result.usage)
 
@@ -748,7 +744,7 @@ def _cmd_tools() -> int:
     print()
     print(f"落盘目录：{store.root}")
     print()
-    print("能力是工具自己声明的，能不能用由策略层判定 —— 见 docs/architecture.md 7.12。")
+    print("能力是工具自己声明的，能不能用由策略层判定 —— 见 permissions.py。")
     print()
     print("另有内核级虚拟工具 write_report（报告子代理，装配即有）：")
     print("  · write_report　[write_local]")
@@ -794,8 +790,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 def _cmd_resume(args: argparse.Namespace) -> int:
     """从被中断的 run 恢复：journal → transcript → 可续聊的会话。
 
-    v1 边界（诚实挂账，见 architecture.md 7.13）：usage 不跨恢复累计、
-    续跑用的是**当前**配置而非崩溃时的快照 —— 这两项等 SQLite 迁移一起做。
+    已知边界：usage 不跨恢复累计；续跑用当前配置，而非崩溃时的快照。
     """
     color = Palette(use_color())
     try:

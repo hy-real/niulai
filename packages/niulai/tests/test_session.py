@@ -1,6 +1,6 @@
 """会话持久化测试（SQLite 存储）。
 
-最要紧的一条是**往返不丢东西**：`tool_calls` 和 `raw_blocks` 少一样，
+最要紧的一条是往返不丢东西：`tool_calls` 和 `raw_blocks` 少一样，
 恢复出来的 transcript 就发不出去了（Anthropic 的 thinking 块缺了直接 400）。
 """
 
@@ -170,7 +170,7 @@ def test_按id前缀查找(tmp_path):
 
 
 def test_存储是单个sqlite文件(tmp_path):
-    """P4 的落点：会话进 niulai.db（单文件、零运维），messages 按序存 JSON payload。"""
+    """会话落点：niulai.db（单文件、零运维），messages 按序存 JSON payload。"""
     store = _store(tmp_path)
     session = store.create()
     session.messages = [Message(role="user", content="你好")]

@@ -1,11 +1,11 @@
 """LLM 适配层。
 
-**两套协议，一套中间表示。** 上层（agent / tools）只认 `LLMClient`，
-换协议 = 换一个实现类 + 改一个配置项，内核一行都不用动。
+两套协议，一套中间表示。上层（agent / tools）只认 LLMClient，换协议 =
+换一个实现类 + 改一个配置项，内核一行都不用动。
 
-- `OpenAICompatClient` —— `/chat/completions`，覆盖 DeepSeek / 通义 / 混元 /
+- OpenAICompatClient —— /chat/completions，覆盖 DeepSeek / 通义 / 混元 /
   Kimi / OpenAI / 各种中转。兼容面最广，是默认。
-- `AnthropicClient` —— `/messages`，Claude 系。差异最多，具体见该模块开头。
+- AnthropicClient —— /messages，Claude 系。差异最多，具体见该模块开头。
 
 用法：
 

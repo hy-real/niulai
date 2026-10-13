@@ -1,85 +1,32 @@
 # niulai
 
-本地优先的 A 股 AI 助手的**内核**。这个包不包含界面 —— 界面（CLI / 浏览器 / 桌面壳 / MCP server）
-都是它的外壳，通过事件流对接。
+本地优先的 A 股 AI 助手。这个包装的是内核、CLI 与本地 Web 服务层：
+自带 API Key，对话、会话与取数全部留在本机。
 
-## 分层
+## 安装
 
-| 包 | 职责 | 关键约束 |
-| --- | --- | --- |
-| `niulai.datasource` | 行情 / K 线 / 财务取数、按能力路由、限流重试 | 工具不认识具体数据源 |
-| `niulai.tools` | 工具定义、参数校验、超时、能力声明、大结果落盘 | 结果在**进上下文之前**就处理掉 |
-| `niulai.llm` | **两套协议**（OpenAI 兼容 / Anthropic）、流式、重试、用量 | 内核只认 `LLMClient`，不认识厂商 |
-| `niulai.agent` | 手写 ReAct 循环、预算、取消、熔断、事件流 | **不 import 任何 UI 代码** |
-| `niulai.context` | 上下文裁剪（历史工具结果压缩） | **只换内容，不删消息** |
-| `niulai.session` | 会话（多轮历史）持久化 | 存完整的，发裁剪的 |
-| `niulai.artifacts` | 大结果落盘与安全读回 | 只能读自己管的目录 |
-| `niulai.trace` | 运行轨迹落盘与回放 | trace 里绝不出现 API Key |
+需要 Python 3.11+。
 
-依赖是**严格单向**的：`cli → agent → tools → datasource`。
-
-## 工具与能力声明
-
-| 工具 | 能力 | 说明 |
-| --- | --- | --- |
-| `stock_quote` | `read` + `network` | 实时行情快照 |
-| `stock_kline` | `read` + `network` | 历史 K 线（日 / 周 / 月，可指定复权） |
-| `stock_financial` | `read` + `network` | 定期报告主要财务指标 |
-| `read_file` | `read` | 读回上一步落盘的大结果，**不出网** |
-
-能力是工具**自己声明**的，判定权不在工具手里 —— 被审对象不能当法官。
-完整的权限模型见 `docs/architecture.md` 7.12；当前 `read_file` 的路径围栏是它的第一块落地。
-
-**结果太大时不截断，而是落盘**：只把「摘要 + 路径 + 开头预览」送进上下文，
-并在摘要里明确写出「这不是全部数据」。模型需要细节时用 `read_file` 分页取。
-理由见 `docs/architecture.md` 7.3 —— 截断会让模型拿到残数据却不知道缺了什么，
-于是给出一个看起来正确的结论。
-
-## 两套协议，一套中间表示
-
-|  | OpenAI 兼容 | Anthropic Messages |
-| --- | --- | --- |
-| 端点 | `/chat/completions` | `/messages` |
-| 认证 | `Authorization: Bearer` | `x-api-key` + `anthropic-version` |
-| system | 普通消息 | **顶层参数** |
-| 工具 schema | `function.parameters` | `input_schema` |
-| 工具结果 | `role="tool"` 消息 | user 消息里的 `tool_result` 块，**同轮多条要合并** |
-| `max_tokens` | 可选 | **必填** |
-| 私有块 | 无 | thinking / redacted_thinking，**必须原样回传** |
-| 缓存 | 多数服务端自动 | 显式 `cache_control` 断点 |
-
-覆盖的模型：DeepSeek / 通义 / 混元 / Kimi / OpenAI（走 openai），
-Claude 系（走 anthropic）。差异全部在 `niulai/llm/` 内消化，
-`AgentRuntime` 一行都不用改。
-
-## 多轮会话
-
-内核的单位是 **run**（一次任务），会话是**外层**概念：
-
-```python
-session = store.create()
-
-result = await runtime.run("茅台现在多少钱", emitter=emitter, session_id=session.id)
-session.messages = [m for m in result.messages if m.role != "system"]
-
-# 下一轮：把历史带回去，模型就知道"它"指的是哪只股票
-result = await runtime.run("它今天成交多少", emitter=emitter, messages=session.messages)
+```bash
+pip install niulai                  # 或从源码：pip install -e packages/niulai
+pip install "niulai[web]"           # Web 界面（niulai serve）需要
 ```
 
-`run()` 接收已有 transcript 并在后面追加，而不是每次从零构建 ——
-这一个入口同时支撑了多轮会话和断点恢复。
+## 命令行
 
-两点值得注意：
+```bash
+export NIULAI_API_KEY="sk-..."
+niulai ask "茅台现在多少钱"        # 问一次
+niulai chat                        # 多轮对话（会记住上下文）
+niulai serve                       # 本地 Web 界面（http://127.0.0.1:8710）
+niulai tools                       # 列出工具、数据源与各自的能力声明
+```
 
-- **会话里不存 system 消息**，由 runtime 每次注入最新版本，这样改了 prompt 立刻对老会话生效。
-- **`run()` 会先修复破损的 transcript**：如果上次是在工具调用途中被中断的（进程被杀 / Ctrl-C），
-  尾部会留下"声明了调用但没有结果"的非法状态，两个协议都不收。
-  补的内容判为**「结果未知」而不是「失败」**—— 工具可能已经把请求发出去了，
-  盲目重试对将来的写类工具就是事故。
-
-## 使用
+## 作为库使用
 
 ```python
+import asyncio
+
 from niulai.agent import AgentRuntime
 from niulai.artifacts import ArtifactStore
 from niulai.config import Settings
@@ -88,26 +35,45 @@ from niulai.events import EventEmitter
 from niulai.llm import build_client
 from niulai.tools import ReadFileTool, ToolRegistry, build_stock_tools
 
-settings = Settings.from_env()
-service = build_default_service()
-store = ArtifactStore()
-tools = ToolRegistry(
-    [*build_stock_tools(service), ReadFileTool(store)],
-    artifact_store=store,          # 不给它，大结果就退回截断
-)
 
-emitter = EventEmitter(run_id="demo")
-emitter.subscribe(lambda ev: print(ev.to_dict()))
+async def main() -> None:
+    settings = Settings.load()
+    service = build_default_service()
+    store = ArtifactStore()
+    tools = ToolRegistry(
+        [*build_stock_tools(service), ReadFileTool(store)],
+        artifact_store=store,          # 不给它，大结果就退回截断
+    )
 
-llm = build_client(settings)
-try:
-    runtime = AgentRuntime(settings=settings, llm=llm, tools=tools)
-    result = await runtime.run("茅台现在多少钱", emitter=emitter)
-    print(result.text, result.usage.total_tokens)
-finally:
-    await llm.aclose()
-    await service.aclose()
+    emitter = EventEmitter(run_id="demo")
+    emitter.subscribe(lambda ev: print(ev.to_dict()))
+
+    llm = build_client(settings)
+    try:
+        runtime = AgentRuntime(settings=settings, llm=llm, tools=tools)
+        result = await runtime.run("茅台现在多少钱", emitter=emitter)
+        print(result.text)
+    finally:
+        await llm.aclose()
+        await service.aclose()
+
+
+asyncio.run(main())
 ```
+
+多轮对话把上一次的 `result.messages` 传回 `run()` 即可，模型就知道"它"指的是哪只股票。
+
+## 工具
+
+| 工具 | 能力 | 说明 |
+| --- | --- | --- |
+| `stock_quote` / `stock_kline` / `stock_financial` / `stock_valuation` / `stock_anomaly` / `stock_auction` / `stock_moneyflow` | `read` + `network` | 单标的：行情 / K 线 / 财务 / 估值 / 当日异动 / 集合竞价 / 资金流 |
+| `market_hot` / `market_limitup` / `market_dragontiger` / `market_auction_benchmark` / `market_index` | `read` + `network` | 市场视野：热股榜 / 涨跌停池与连板天梯 / 龙虎榜 / 短线风向标 / 指数与板块 |
+| `stock_indicator` | `read` + `network` | 技术指标（MA / MACD / KDJ / RSI / 布林 / 量能） |
+| `read_file` | `read` | 读回上一步落盘的大结果，不出网 |
+| `write_file` | `write_local` | 写报告 / 产出到当前会话目录（越权与覆盖先过权限门） |
+
+工具按数据源能力门控：某个能力没有可用数据源时，对应工具不注册，模型看不到它。
 
 ## 环境变量
 
@@ -116,21 +82,22 @@ finally:
 | `NIULAI_API_KEY` | API Key（必填） | — |
 | `NIULAI_PROTOCOL` | `openai` / `anthropic` | 按接入点自动推断 |
 | `NIULAI_BASE_URL` | 接入点 | 随协议变化 |
-| `NIULAI_MODEL` | 模型名 | `deepseek-chat` / `claude-sonnet-5` |
-| `NIULAI_HOME` | 数据目录覆盖（traces / sessions / artifacts） | 平台默认目录 |
+| `NIULAI_MODEL` | 模型名 | `deepseek-flash` |
+| `NIULAI_THS_API_KEY` | 同花顺数据源 Key（主源）；缺省退回东财 / 腾讯兜底 | — |
+| `NIULAI_HOME` | 数据目录（traces / sessions / artifacts / logs / niulai.db） | `~/.niulai` |
+| `NIULAI_LOG_LEVEL` | 日志级别（debug / info / warning / error） | `warning` |
+| `NIULAI_LOG_FILE` | 日志文件路径（不设且级别开到 INFO/DEBUG 时自动落数据目录） | — |
 
 也兼容 `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` / `ANTHROPIC_API_KEY`。
 
 **协议推断顺序**：显式 `NIULAI_PROTOCOL` > 接入点里含 `anthropic` >
 只提供了 `ANTHROPIC_API_KEY` > 默认 `openai`。
 
-填错协议的典型表现是 `HTTP 404` 或 `model not found`，而不是中文提示 ——
-所以不确定时请显式指定。
-
 ## 可调参数（`Settings`）
 
-`max_turns` / `tool_timeout_s` / `max_consecutive_failures` / `keep_recent_tool_results` /
-`max_retries` —— 前三个是**硬约束**，对应"四件套"里的三项（第四项是取消，由 asyncio 任务取消承担）。
+`max_turns` / `tool_timeout_s` / `max_retries` / `max_consecutive_failures` /
+`keep_recent_tool_results` / `report_max_turns` / `approval_timeout_s` /
+`max_tokens` / `prompt_cache`，均可经环境变量或 `~/.niulai/config.toml` 覆盖。
 
 ## 开发
 
