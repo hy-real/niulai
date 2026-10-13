@@ -82,6 +82,9 @@ DEFAULT_MAX_CONSECUTIVE_FAILURES = 2
 DEFAULT_APPROVAL_TIMEOUT_S = 120.0
 # 发给模型时保留最近几条工具结果的原样内容（更早的换成占位说明）。
 DEFAULT_KEEP_RECENT_TOOL_RESULTS = 15
+# 报告子代理（agent/report.py）的单次委派轮数上限。它只做"写文件 + 读回自查"，
+# 6 轮足够；给它和主代理一样的 12 轮反而容易在改稿上空转。
+DEFAULT_REPORT_MAX_TURNS = 6
 # Anthropic 的 max_tokens 是必填项，而且**包含思考预算** ——
 # 给太小会在长报告里被截断。OpenAI 兼容那边不传这个字段，用服务端默认。
 DEFAULT_MAX_TOKENS = 8_192
@@ -161,6 +164,7 @@ class Settings:
     max_tokens: int = DEFAULT_MAX_TOKENS
     max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES
     approval_timeout_s: float = DEFAULT_APPROVAL_TIMEOUT_S
+    report_max_turns: int = DEFAULT_REPORT_MAX_TURNS
     keep_recent_tool_results: int = DEFAULT_KEEP_RECENT_TOOL_RESULTS
     # 仅 Anthropic 生效：给 system 挂缓存断点（服务端低于最小长度会静默跳过）
     prompt_cache: bool = True
@@ -225,6 +229,7 @@ class Settings:
             keep_recent_tool_results=_int_from(
                 llm, "keep_recent_tool_results", DEFAULT_KEEP_RECENT_TOOL_RESULTS
             ),
+            report_max_turns=_int_from(llm, "report_max_turns", DEFAULT_REPORT_MAX_TURNS),
             prompt_cache=_bool_from(llm, "prompt_cache", True),
         )
 

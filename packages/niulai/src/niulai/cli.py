@@ -25,11 +25,13 @@ import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from . import __version__
 from .agent import AgentRuntime, RunResult
 from .agent.loop import _repair_transcript
+from .agent.report import ReportDelegate
 from .artifacts import ArtifactStore
 from .config import Settings, read_config_file, read_ths_api_key
 from .datasource import build_default_service
@@ -102,14 +104,31 @@ class ConsoleRenderer:
 
     def __call__(self, event: Event) -> None:
         data = event.data
+        # 子代理事件缩进一级，层级一眼可辨（与前端同一套约定）
+        pad = "  └ " if data.get("sub_agent") else "  "
 
-        if event.type is EventType.TURN_START:
+        if event.type is EventType.SUB_RUN_START:
+            self._newline()
+            task = " ".join((data.get("task") or "").split())[:40]
+            print(self.c.dim(f"{pad}▸ 子代理「{data.get('sub_agent')}」启动：{task}…"))
+
+        elif event.type is EventType.SUB_RUN_END:
+            self._newline()
+            usage = data.get("usage") or {}
+            print(
+                self.c.dim(
+                    f"{pad}▸ 子代理结束（{data.get('stop_reason')}，"
+                    f"{usage.get('total_tokens', 0):,} tokens）"
+                )
+            )
+
+        elif event.type is EventType.TURN_START:
             self._newline()
             suffix = "" if data.get("tools_enabled", True) else "（收口：不再调用工具）"
             omitted = data.get("context_omitted") or 0
             if omitted:
                 suffix += f"（已压缩 {omitted} 条历史工具结果）"
-            print(self.c.dim(f"· 第 {data['turn']} 轮{suffix}"))
+            print(self.c.dim(f"{pad}· 第 {data['turn']} 轮{suffix}"))
 
         elif event.type is EventType.TEXT_DELTA:
             sys.stdout.write(data.get("text", ""))
@@ -118,12 +137,12 @@ class ConsoleRenderer:
 
         elif event.type is EventType.TOOL_CALL:
             self._newline()
-            print(self.c.cyan(f"  ⚙ {data.get('name')}({data.get('arguments', '')})"))
+            print(self.c.cyan(f"{pad}⚙ {data.get('name')}({data.get('arguments', '')})"))
 
         elif event.type is EventType.CIRCUIT_BREAK:
             self._newline()
             kind = "重复调用" if data.get("reason") == "duplicate_call" else "连续失败"
-            print(self.c.yellow(f"  ⛔ 熔断（{kind}）：{data.get('name')} 已被拦下，未执行"))
+            print(self.c.yellow(f"{pad}⛔ 熔断（{kind}）：{data.get('name')} 已被拦下，未执行"))
 
         elif event.type is EventType.PERMISSION_REQUEST:
             # 交互提示由 CliApprovalChannel 自己打印（它要读 stdin），
@@ -134,16 +153,16 @@ class ConsoleRenderer:
             self._newline()
             if data.get("granted"):
                 note = "（本会话不再问）" if data.get("always") else ""
-                print(self.c.green(f"  ✓ 已许可{note}"))
+                print(self.c.green(f"{pad}✓ 已许可{note}"))
             else:
                 by = data.get("by") or "user"
-                print(self.c.red(f"  ✗ 未许可（{by}）"))
+                print(self.c.red(f"{pad}✗ 未许可（{by}）"))
 
         elif event.type is EventType.ARTIFACT:
             self._newline()
             print(
                 self.c.dim(
-                    f"  📄 结果过大已落盘：{data.get('path')}"
+                    f"{pad}📄 结果过大已落盘：{data.get('path')}"
                     f"（{data.get('content_chars', 0):,} 字符，可用 read_file 读取）"
                 )
             )
@@ -155,7 +174,7 @@ class ConsoleRenderer:
             detail = f"{data.get('content_chars', 0)} 字符"
             if data.get("artifact"):
                 detail += "，已落盘"
-            print(self.c.dim(f"  {mark} 返回 {detail}"))
+            print(self.c.dim(f"{pad}{mark} 返回 {detail}"))
 
         elif event.type is EventType.ERROR:
             self._newline()
@@ -264,12 +283,32 @@ def _assemble(
         artifact_store=store,
     )
     llm = build_client(settings)
+
+    def build_report_tools(data_root: Path) -> list[Any]:
+        """报告子代理的工具面：只读数据 + read_file + write_file。
+
+        刻意比主代理窄 —— least privilege 的落地形状：会写盘的只有
+        write_file 一个，且过同一道权限门。
+        """
+        return [
+            *build_stock_tools(service),
+            *build_market_tools(service),
+            ReadFileTool(store, data_root=data_root),
+            WriteFileTool(data_root=data_root),
+        ]
+
+    report = ReportDelegate(
+        build_tools=build_report_tools,
+        llm=llm,
+        max_turns=settings.report_max_turns,
+    )
     runtime = AgentRuntime(
         settings=settings,
         llm=llm,
         tools=tools,
         approval_channel=approval_channel,
         approval_memory=approval_memory,
+        report_delegate=report,
     )
     return Assembly(runtime=runtime, llm=llm, service=service, tools=tools, store=store)
 
@@ -636,6 +675,19 @@ def _render_record(record: dict[str, Any], color: Palette) -> None:
             )
         )
 
+    elif kind == "sub_run_start":
+        task = " ".join((record.get("task") or "").split())[:50]
+        print(color.dim(f"[{ts}] ▸ 子代理「{record.get('sub_agent')}」启动：{task}…"))
+
+    elif kind == "sub_run_end":
+        usage = record.get("usage") or {}
+        print(
+            color.dim(
+                f"[{ts}] ▸ 子代理结束（{record.get('stop_reason')}，"
+                f"{usage.get('total_tokens', 0):,} tokens）"
+            )
+        )
+
     elif kind == "tool_result":
         mark = "✓" if record.get("ok") else "✗"
         line = f"[{ts}] {mark} {record.get('name')} 返回 {record.get('content_chars')} 字符"
@@ -697,6 +749,10 @@ def _cmd_tools() -> int:
     print(f"落盘目录：{store.root}")
     print()
     print("能力是工具自己声明的，能不能用由策略层判定 —— 见 docs/architecture.md 7.12。")
+    print()
+    print("另有内核级虚拟工具 write_report（报告子代理，装配即有）：")
+    print("  · write_report　[write_local]")
+    print("      把分析整理成 Markdown 报告落盘；主对话只收回路径与小结")
     return 0
 
 

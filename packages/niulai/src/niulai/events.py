@@ -36,6 +36,11 @@ class EventType(str, Enum):
     FINAL = "final"
     ERROR = "error"
     RUN_END = "run_end"
+    # 子代理（sub-agent）：内核把一项任务委派给嵌套的 run（如报告撰写）。
+    # 子 run 不另起 trace 文件 —— 它的事件带 `sub_agent` 标记汇入父 run 同一条流，
+    # seq 继续编号（SubAgentEmitter 转发时沿用父的），回放时层级可分辨。
+    SUB_RUN_START = "sub_run_start"
+    SUB_RUN_END = "sub_run_end"
 
 
 # 不写进 trace 的事件类型（高频、可由其他事件重建）
@@ -98,3 +103,34 @@ class EventEmitter:
                 # 落盘类 sink 自己负责把错误暴露出来，见 trace.TraceWriter。
                 pass
         return event
+
+
+class SubAgentEmitter:
+    """子 run 的事件出口：转发给父 emitter，只给每个事件打 `sub_agent` 标。
+
+    **为什么需要它**：子 run 与父 run 共用同一条事件流 / 同一个 trace 文件
+    （一份运行、一个 journal），但两条隐忧要解决：
+
+    1. **seq 必须连续** —— 另起一个 EventEmitter 会从 1 重新编号，同一个
+       run_id 下出现重复 seq，回放对账就乱了。所以这里不持有 seq，全部
+       经父 emitter 发出；
+    2. **层级必须可分辨** —— 前端 / trace 要靠 `sub_agent` 标记区分
+       "这是子代理在调工具"而不是父代理。
+
+    它不是 EventEmitter 的子类（没有自己的 seq / sinks），只是 loop 所需的
+    最小接口：`run_id` 属性 + `emit()`。
+    """
+
+    def __init__(self, parent: EventEmitter, name: str) -> None:
+        self._parent = parent
+        self._name = name
+
+    @property
+    def run_id(self) -> str:
+        return self._parent.run_id
+
+    def emit(self, type_: EventType, **data: Any) -> Event:
+        # 以本 wrapper 的标为准（调用方也传 sub_agent 时覆盖它）——
+        # 父子都用同一个键，谁生效必须只有一个答案。
+        data["sub_agent"] = self._name
+        return self._parent.emit(type_, **data)

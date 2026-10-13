@@ -22,6 +22,14 @@
 所以无人值守时 fail-safe 默认拒绝。被拦下的调用照样回灌一条 tool 消息，
 内容写成"不要再尝试"（见 permissions.py 与 architecture.md 7.14）。
 
+## 子代理：write_report 是内核级虚拟工具
+
+报告委派**不走 ToolRegistry**：`write_report` 的 spec 由循环动态注入给模型
+（装配了 ReportDelegate 才注入），调用由循环分发到 `agent/report.py` 的嵌套
+run。这样注册表保持"数据工具执行器"的单一职责，而委派所需的每次 run 状态
+（emitter / session_id / 审批通道）天然就在循环手里。子 run 的事件经
+SubAgentEmitter 打标汇入同一条流，seq 连续；用量合并回父 run 的统计。
+
 ## transcript 是入口，不是内部细节
 
 `run()` 接受一份已有的 messages 并在后面追加，而不是每次从零构建。
@@ -40,7 +48,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+import json
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 
 from ..config import Settings
@@ -54,9 +63,17 @@ from ..permissions import (
     PermissionGate,
     session_scope_dir,
 )
-from ..tools import ToolRegistry
+from ..tools import ToolRegistry, ToolResult
+from ..tools.base import _missing_required, _parse_arguments
 from .guard import ToolGuard
 from .prompt import load_prompt
+from .report import (
+    REPORT_CAPABILITIES,
+    REPORT_TOOL_NAME,
+    REPORT_TOOL_SPEC,
+    ReportDelegate,
+    run_report,
+)
 
 FORCE_ANSWER_PROMPT = (
     "本轮的工具调用额度已经用完。请立刻基于上面已经获得的信息回答用户，不要再调用工具。"
@@ -102,6 +119,7 @@ class AgentRuntime:
         system_prompt: str | None = None,
         approval_channel: ApprovalChannel | None = None,
         approval_memory: ApprovalMemory | None = None,
+        report_delegate: ReportDelegate | None = None,
     ) -> None:
         self._settings = settings
         self._llm = llm
@@ -113,6 +131,9 @@ class AgentRuntime:
         self._approval_channel = approval_channel
         # "总是允许"的会话级记忆：按会话隔离、跨 run 有效、重启即忘
         self._approval_memory = approval_memory or ApprovalMemory()
+        # 报告子代理委派器。None = 未装配（测试 / 极简用法）：模型看不到
+        # write_report，也不会被分发 —— 功能是"装配即有"，不是永远在。
+        self._report_delegate = report_delegate
 
     async def run(
         self,
@@ -122,6 +143,7 @@ class AgentRuntime:
         messages: Sequence[Message] | None = None,
         session_id: str | None = None,
         approval_channel: ApprovalChannel | None = None,
+        sub_agent: str | None = None,
     ) -> RunResult:
         """跑一次任务。
 
@@ -130,6 +152,10 @@ class AgentRuntime:
 
         `approval_channel` 是**本 run 专用**的审批通道（Web 外壳每 run 建一个，
         因为 SSE 连接是每 run 一条）；不传则用构造时给的（CLI 的交互通道）。
+
+        `sub_agent` 非空表示这是**子 run**（被父 run 委派）：生命周期事件
+        从 RUN_START / RUN_END 换成 SUB_RUN_START / SUB_RUN_END——
+        一条 trace 里只能有一个 run 的开始和结束，子 run 是其中的一段。
         """
         transcript = list(messages) if messages else []
         resumed = bool(transcript)
@@ -149,26 +175,75 @@ class AgentRuntime:
         turn = 0
         omitted_total = 0
         guard = ToolGuard(max_consecutive_failures=self._settings.max_consecutive_failures)
+        channel = approval_channel or self._approval_channel
         gate = PermissionGate(
             emitter=emitter,
-            channel=approval_channel or self._approval_channel,
+            channel=channel,
             memory=self._approval_memory,
             session_id=session_id,
             run_id=emitter.run_id,
         )
+
+        # 子代理用量记账：列表而不是返回值，因为委派发生在 _run_tools 内部的
+        # 并行任务里；单个 run 内只有委派任务会追加，无并发写问题。
+        sub_usage: list[Usage] = []
+
+        report_runner: Callable[[ToolCall], Awaitable[ToolResult]] | None = None
+        if self._report_delegate is not None:
+            delegate = self._report_delegate
+
+            async def report_runner(call: ToolCall) -> ToolResult:
+                # 参数校验在派发点做（与 ToolRegistry.execute 同一套 helper、
+                # 同一种可恢复错误文案）—— 模型缺 brief / path 时立刻拿到
+                # 结构化反馈，而不是进了子代理才失败。
+                args, parse_error = _parse_arguments(call.arguments)
+                if parse_error is not None:
+                    return ToolResult(ok=False, content=parse_error)
+                missing = _missing_required(REPORT_TOOL_SPEC.parameters, args)
+                if missing:
+                    schema = json.dumps(REPORT_TOOL_SPEC.parameters, ensure_ascii=False)
+                    return ToolResult(
+                        ok=False,
+                        content=(
+                            f"调用 `{REPORT_TOOL_NAME}` 缺少必填参数：{'、'.join(missing)}。"
+                            f"该工具的参数定义：{schema}"
+                        ),
+                    )
+                content, extra = await run_report(
+                    delegate,
+                    brief=str(args.get("brief") or ""),
+                    path=str(args.get("path") or ""),
+                    emitter=emitter,
+                    session_id=session_id,
+                    approval_channel=channel,
+                    approval_memory=self._approval_memory,
+                    settings=self._settings,
+                )
+                sub_usage.append(extra)
+                return ToolResult(ok=True, content=content, meta={"content_chars": len(content)})
+
+        if sub_agent is None:
+            emitter.emit(
+                EventType.RUN_START,
+                task=task,
+                model=self._settings.model,
+                protocol=self._settings.protocol,
+                tool_names=self._tools.names(),
+                session_id=session_id,
+                resumed=resumed,
+                repaired_messages=repaired,
+            )
+        else:
+            emitter.emit(
+                EventType.SUB_RUN_START,
+                task=task,
+                sub_agent=sub_agent,
+                model=self._settings.model,
+                session_id=session_id,
+                tool_names=self._tools.names(),
+            )
         streamed: list[str] = []       # 本轮流式输出的累计 —— 取消时用它留住半截回答
         assistant_recorded = False     # 本轮 assistant 消息是否已写入 transcript
-
-        emitter.emit(
-            EventType.RUN_START,
-            task=task,
-            model=self._settings.model,
-            protocol=self._settings.protocol,
-            tool_names=self._tools.names(),
-            session_id=session_id,
-            resumed=resumed,
-            repaired_messages=repaired,
-        )
 
         try:
             for turn in range(1, self._settings.max_turns + 1):
@@ -241,8 +316,17 @@ class AgentRuntime:
                     break
 
                 await self._run_tools(
-                    response, transcript, emitter, turn=turn, guard=guard, gate=gate
+                    response,
+                    transcript,
+                    emitter,
+                    turn=turn,
+                    guard=guard,
+                    gate=gate,
+                    report_runner=report_runner,
                 )
+                for extra in sub_usage:
+                    usage = usage.merged(extra)
+                sub_usage.clear()
 
             emitter.emit(EventType.FINAL, text=final_text, stop_reason=stop_reason)
             return RunResult(
@@ -278,14 +362,23 @@ class AgentRuntime:
             )
 
         finally:
-            emitter.emit(
-                EventType.RUN_END,
-                stop_reason=stop_reason,
-                turns=turn,
-                usage=usage.to_dict(),
-                context_omitted=omitted_total,
-                breaks=len(guard.breaks),
-            )
+            if sub_agent is None:
+                emitter.emit(
+                    EventType.RUN_END,
+                    stop_reason=stop_reason,
+                    turns=turn,
+                    usage=usage.to_dict(),
+                    context_omitted=omitted_total,
+                    breaks=len(guard.breaks),
+                )
+            else:
+                emitter.emit(
+                    EventType.SUB_RUN_END,
+                    sub_agent=sub_agent,
+                    stop_reason=stop_reason,
+                    turns=turn,
+                    usage=usage.to_dict(),
+                )
 
     async def _run_tools(
         self,
@@ -296,6 +389,7 @@ class AgentRuntime:
         turn: int,
         guard: ToolGuard,
         gate: PermissionGate,
+        report_runner: Callable[[ToolCall], Awaitable[ToolResult]] | None = None,
     ) -> None:
         """执行这一轮声明的全部 tool_calls，并把结果回灌进 messages。
 
@@ -303,6 +397,11 @@ class AgentRuntime:
         敏感的 —— 同一批里完全重复的调用，第二个就该被拦下），再过权限门
         （ask 要等人答复，天然只能一个一个来），放行的调用经信号量限流后
         并发执行（asyncio.gather）。
+
+        `write_report` 是唯一的非数据工具：它不过 ToolRegistry，由循环分发到
+        报告子代理（report_runner）。子代理内部是一个完整的嵌套 run，慢
+        （多轮 LLM + 写文件），所以**不吃** MAX_PARALLEL_TOOL_CALLS 信号量
+        —— 那把伞是给数据源的限流重试配的，罩不住一个子代理。
 
         结果消息的回灌顺序只由**模型声明的顺序**决定，与完成先后无关：
         TOOL_RESULT 事件随完成实时发出（前端按 tool_call_id 归位），
@@ -321,6 +420,13 @@ class AgentRuntime:
             # record 只改内存 dict、无 await，事件循环内天然原子，不会丢更新。
             # 并行批内同工具"一败一成"时计数按完成顺序落 —— 并发下"连续"
             # 本无全序，偏差方向只会偏保守（早拦一次），不会偏失控（见 guard.py）
+            guard.record(call, ok=result.ok)
+            _emit_tool_result(emitter, turn=turn, call=call, result=result)
+            return result
+
+        async def _execute_report(call: ToolCall) -> ToolResult:
+            assert report_runner is not None  # 仅在派发点判定后才被创建
+            result = await report_runner(call)
             guard.record(call, ok=result.ok)
             _emit_tool_result(emitter, turn=turn, call=call, result=result)
             return result
@@ -360,9 +466,15 @@ class AgentRuntime:
                     ))
                     continue
 
-                blocked = await gate.check(
-                    call, self._tools.capabilities(call.name), turn=turn
+                # write_report 是内核级虚拟工具，不在 registry 里 —— 它的
+                # 能力声明（write_local）由循环直接给出，否则 capabilities()
+                # 会按"查无此工具"退化成只读，权限门将永远放行。
+                capabilities = (
+                    REPORT_CAPABILITIES
+                    if call.name == REPORT_TOOL_NAME
+                    else self._tools.capabilities(call.name)
                 )
+                blocked = await gate.check(call, capabilities, turn=turn)
                 if blocked is not None:
                     # 被权限门拦下（deny / 用户拒绝）：不执行，照样回灌。
                     # 内容写成"不要再尝试"—— 否则模型会换个参数反复重试。
@@ -377,6 +489,11 @@ class AgentRuntime:
                             is_error=True,
                         ),
                     ))
+                    continue
+
+                if call.name == REPORT_TOOL_NAME and report_runner is not None:
+                    # 委派报告子代理（内核级虚拟工具，不进 ToolRegistry）
+                    plans.append((call, asyncio.create_task(_execute_report(call)), None))
                     continue
 
                 plans.append((call, asyncio.create_task(_execute(call)), None))
@@ -423,6 +540,10 @@ class AgentRuntime:
         text_sink: list[str] | None = None,
     ) -> LLMResponse:
         specs = self._tools.specs() if allow_tools else []
+        if allow_tools and self._report_delegate is not None:
+            # write_report 的 spec 由循环动态注入（它不在 registry 里）——
+            # 没装配 ReportDelegate 时模型根本看不到这个工具
+            specs = [*specs, REPORT_TOOL_SPEC]
 
         def on_text(chunk: str) -> None:
             emitter.emit(EventType.TEXT_DELTA, text=chunk)
@@ -501,8 +622,8 @@ def _runtime_note(session_id: str | None, run_id: str) -> str:
     return (
         "# 运行时上下文（系统每轮注入，不是用户说的话）\n"
         f"- 当前会话 id：{who}\n"
-        f"- 文件输出目录：{scope}/ —— 用 write_file 落报告时用它做路径前缀，"
-        "例如 "
+        f"- 文件输出目录：{scope}/ —— 用 write_file / write_report 落文件时"
+        "用它做路径前缀，例如 "
         f"`{scope}/报告.md`"
     )
 

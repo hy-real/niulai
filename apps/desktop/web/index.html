@@ -117,6 +117,8 @@
   .tool .prev { color:var(--muted); margin-top:6px; padding-top:6px; border-top:1px dashed var(--border);
                 white-space:pre-wrap; word-break:break-all; font-family:var(--mono); font-size:11.5px; }
   .ok { color:var(--down); } .err { color:var(--up); } .warn { color:var(--yellow); }
+  /* 子代理的工具卡片：缩进一级 + 左侧 accent 线，层级一眼可辨 */
+  .tool.sub { margin-left:22px; border-left:2px solid var(--accent); }
 
   /* ---------- 空状态（首页） ---------- */
   #empty { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
@@ -586,9 +588,18 @@ document.getElementById('apv_deny').addEventListener('click', () => respondAppro
 
 function handle(name, d) {
   if (name === 'run_start') { el('user', d.task); return; }
-  if (name === 'turn_start') {
+  // 子代理（报告撰写等）事件缩进一级 —— 与 CLI 的 └ 前缀同一套约定
+  const sub = d.sub_agent ? '  └ ' : '';
+  if (name === 'sub_run_start') {
+    const task = (d.task || '').slice(0, 40);
+    el('line', sub + '▸ 子代理「' + d.sub_agent + '」启动：' + task + '…');
+  } else if (name === 'sub_run_end') {
+    const tk = (d.usage && d.usage.total_tokens)
+      ? '，' + d.usage.total_tokens.toLocaleString() + ' tokens' : '';
+    el('line', sub + '▸ 子代理结束（' + (d.stop_reason || '') + tk + '）');
+  } else if (name === 'turn_start') {
     bubble = null;
-    el('line', '· 本问第 ' + d.turn + ' 轮'
+    el('line', sub + '· 本问第 ' + d.turn + ' 轮'
       + (d.tools_enabled ? '' : '（收口：不再调用工具）')
       + (d.context_omitted ? '（已压缩 ' + d.context_omitted + ' 条历史工具结果）' : ''));
   } else if (name === 'text_delta') {
@@ -599,8 +610,9 @@ function handle(name, d) {
   } else if (name === 'tool_call') {
     bubble = null;
     const card = el('tool');
+    if (d.sub_agent) card.classList.add('sub');   // 子代理的调用卡片缩进 + 左侧 accent 线
     const head = document.createElement('div'); head.className = 'head';
-    head.textContent = '⚙ ' + d.name + '(' + d.arguments + ')';
+    head.textContent = (d.sub_agent ? '└ ' : '') + '⚙ ' + d.name + '(' + d.arguments + ')';
     card.appendChild(head);
     toolCards.set(d.tool_call_id, card);
   } else if (name === 'tool_result') {
@@ -620,16 +632,16 @@ function handle(name, d) {
   } else if (name === 'circuit_break') {
     bubble = null; el('line warn', '⛔ 熔断：' + d.name + ' 已被拦下，未执行');
   } else if (name === 'permission_request') {
-    el('line warn', '⏸ 等待审批：' + d.tool + ' → ' + (d.summary || ''));
+    el('line warn', sub + '⏸ 等待审批：' + d.tool + ' → ' + (d.summary || ''));
     approvalQueue.push(d);
     renderApproval();
   } else if (name === 'permission_decision') {
     approvalQueue = approvalQueue.filter(r => r.request_id !== d.request_id);
     renderApproval();
-    if (d.granted) el('line', '✓ 已许可' + (d.always ? '（本会话不再问）' : ''));
-    else el('line err', '✗ 未许可（' + (d.by || 'user') + '）');
+    if (d.granted) el('line', sub + '✓ 已许可' + (d.always ? '（本会话不再问）' : ''));
+    else el('line err', sub + '✗ 未许可（' + (d.by || 'user') + '）');
   } else if (name === 'artifact') {
-    el('line', '📄 结果过大已落盘：' + d.path + '（' + (d.content_chars || 0).toLocaleString() + ' 字符）');
+    el('line', sub + '📄 结果过大已落盘：' + d.path + '（' + (d.content_chars || 0).toLocaleString() + ' 字符）');
   } else if (name === 'error') {
     el('line err', '! ' + d.kind + ': ' + d.message);
   } else if (name === 'run_result') {
