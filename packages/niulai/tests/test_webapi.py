@@ -26,6 +26,78 @@ def _client(monkeypatch, tmp_path) -> TestClient:
     return TestClient(create_app())
 
 
+# --------------------------------------------------------------------------
+# 文件面板：会话文件列表 + 内容读取（围栏与 read_file 同一份）
+# --------------------------------------------------------------------------
+
+
+def test_会话文件端点列出会话目录下的文件(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    store = SessionStore()
+    sid = _make_session(store)
+    folder = tmp_path / "sessions" / sid
+    folder.mkdir(parents=True)
+    (folder / "茅台-分析.md").write_text("# 标题\n结论", encoding="utf-8")
+    (folder / "子目录").mkdir()
+    (folder / "子目录" / "附录.txt").write_text("附录", encoding="utf-8")
+
+    data = client.get(f"/api/sessions/{sid}/files").json()
+
+    assert data["dir"] == f"sessions/{sid}"
+    names = {f["name"] for f in data["files"]}
+    assert names == {"茅台-分析.md", "附录.txt"}
+    by_name = {f["name"]: f for f in data["files"]}
+    assert by_name["茅台-分析.md"]["path"] == f"sessions/{sid}/茅台-分析.md"
+    assert by_name["茅台-分析.md"]["size"] > 0
+
+
+def test_会话文件端点_没有产出时返回空列表(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    sid = _make_session(SessionStore())
+
+    data = client.get(f"/api/sessions/{sid}/files").json()
+
+    assert data["files"] == []
+    assert data["dir"] == f"sessions/{sid}"
+
+
+def test_文件内容端点读取原文(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    store = SessionStore()
+    sid = _make_session(store)
+    folder = tmp_path / "sessions" / sid
+    folder.mkdir(parents=True)
+    (folder / "报告.md").write_text("# 大金重工\n\n核心结论：短线情绪偏多。", encoding="utf-8")
+
+    data = client.get("/api/files/content", params={"path": f"sessions/{sid}/报告.md"}).json()
+
+    assert data["name"] == "报告.md"
+    assert "核心结论：短线情绪偏多。" in data["content"]
+
+
+def test_文件内容端点_目录外一律403(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    outside = tmp_path.parent / "niulai-外面.txt"
+    outside.write_text("x", encoding="utf-8")
+
+    resp = client.get("/api/files/content", params={"path": outside.as_posix()})
+
+    assert resp.status_code == 403
+
+
+def test_文件内容端点_config自动脱敏(monkeypatch, tmp_path):
+    """Key 不因为"只是界面看看"而放松——这条出口也要脱敏。"""
+    client = _client(monkeypatch, tmp_path)
+    (tmp_path / "config.toml").write_text(
+        '[llm]\napi_key = "sk-super-secret-0001"\n', encoding="utf-8"
+    )
+
+    data = client.get("/api/files/content", params={"path": "config.toml"}).json()
+
+    assert "sk-super-secret-0001" not in data["content"]
+    assert "已脱敏" in data["content"]
+
+
 def test_tools端点列出数据源与工具(monkeypatch, tmp_path):
     client = _client(monkeypatch, tmp_path)
     resp = client.get("/api/tools")

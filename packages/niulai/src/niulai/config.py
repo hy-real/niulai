@@ -82,9 +82,11 @@ DEFAULT_MAX_CONSECUTIVE_FAILURES = 2
 DEFAULT_APPROVAL_TIMEOUT_S = 120.0
 # 发给模型时保留最近几条工具结果的原样内容（更早的换成占位说明）。
 DEFAULT_KEEP_RECENT_TOOL_RESULTS = 15
-# 报告子代理（agent/report.py）的单次委派轮数上限。它只做"写文件 + 读回自查"，
-# 6 轮足够；给它和主代理一样的 12 轮反而容易在改稿上空转。
-DEFAULT_REPORT_MAX_TURNS = 6
+# 报告子代理（agent/report.py）的单次委派轮数上限。
+# 6 是初值，实测不够：子代理容易自己补取好几个工具的数据（每次 LLM 调用
+# 算一轮），写完文件后没额度做 read_file 读回自查，stop_reason 落在
+# max_turns。10 留出的余量覆盖"取数 3-4 轮 + 写 + 读回 + 改一版"。
+DEFAULT_REPORT_MAX_TURNS = 10
 # Anthropic 的 max_tokens 是必填项，而且**包含思考预算** ——
 # 给太小会在长报告里被截断。OpenAI 兼容那边不传这个字段，用服务端默认。
 DEFAULT_MAX_TOKENS = 8_192

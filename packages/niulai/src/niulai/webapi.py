@@ -36,15 +36,17 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .agent.loop import _repair_transcript
+from .artifacts import ArtifactError
 from .cli import Assembly, _assemble
 from .config import Settings, read_ths_api_key
 from .datasource.base import Capability
 from .errors import ConfigError
 from .events import EventEmitter, EventType, new_run_id
 from .llm import Usage
-from .paths import trace_dir
+from .paths import data_dir, trace_dir
 from .permissions import Approval, ApprovalMemory, PermissionRequest
 from .session import TITLE_CHARS, SessionError, SessionStore, _ts_ms
+from .tools.files import read_display_text, resolve_in_data_root
 from .trace import TraceResumeError, TraceWriter, load_transcript, read_trace
 
 DEFAULT_PORT = 8710
@@ -604,6 +606,62 @@ def create_app() -> FastAPI:
         if not ok:
             raise HTTPException(status_code=409, detail="该审批已处理或已超时")
         return {"ok": True}
+
+    # ------------------------------------------------------------ 文件面板
+    # 右侧栏浏览"这个会话产出过什么文件"。列表只看会话自己的目录
+    # （sessions/<id>/），内容读走 read_file 同一道围栏。
+
+    @app.get("/api/sessions/{session_id}/files")
+    def api_session_files(session_id: str):
+        """列出会话产出目录（sessions/<id>/）下的文件，按修改时间倒序。"""
+        try:
+            session = store.load(session_id)
+        except SessionError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        root = data_dir().resolve()
+        folder = root / "sessions" / session.id
+        # 围栏：session.id 虽来自库内主键，路径仍要真验一次（防 id 里带穿越字符）
+        try:
+            folder.resolve().relative_to(root)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="非法会话目录") from exc
+
+        items: list[dict[str, Any]] = []
+        if folder.is_dir():
+            for path in sorted(folder.rglob("*")):
+                if not path.is_file():
+                    continue
+                stat = path.stat()
+                items.append(
+                    {
+                        "path": path.relative_to(root).as_posix(),
+                        "name": path.name,
+                        "size": stat.st_size,
+                        "mtime": int(stat.st_mtime * 1000),
+                    }
+                )
+        items.sort(key=lambda item: item["mtime"], reverse=True)
+        return {"dir": f"sessions/{session.id}", "files": items}
+
+    @app.get("/api/files/content")
+    def api_file_content(path: str):
+        """读数据目录内的文件内容（文件面板预览）。围栏与 read_file 同一份。"""
+        try:
+            resolved = resolve_in_data_root(path)
+        except ArtifactError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        if not resolved.is_file():
+            raise HTTPException(status_code=404, detail=f"找不到文件：{path}")
+
+        content = read_display_text(resolved)
+        root = data_dir().resolve()
+        return {
+            "path": resolved.relative_to(root).as_posix(),
+            "name": resolved.name,
+            "chars": len(content),
+            "content": content,
+        }
 
     return app
 

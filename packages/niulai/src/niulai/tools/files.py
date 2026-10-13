@@ -63,6 +63,35 @@ _PARAMETERS: dict[str, Any] = {
 }
 
 
+def resolve_in_data_root(raw: str, data_root: Path | None = None) -> Path:
+    """把引用解析成真实路径：相对数据根（或目录内绝对路径）→ 过围栏。
+
+    越界抛 `ArtifactError`。**read_file 工具与 Web 文件面板共用这一份围栏** ——
+    同一道边界写两遍，迟早有一处漏。
+    """
+    root = (data_root or data_dir()).resolve()
+    resolved = (root / raw).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ArtifactError(
+            f"拒绝访问 `{raw}`：只能读写数据目录 {root} 之内的文件"
+        ) from exc
+    return resolved
+
+
+def read_display_text(path: Path, *, max_chars: int = 1_000_000) -> str:
+    """读文本用于界面展示：封顶体量 + config.toml 自动脱敏。
+
+    Key 脱敏在这里再做一次（read_file 里已有一份）：界面预览是另一条出口，
+    规矩不因为"只是看看"而放松。
+    """
+    text = _read_capped(path, max_chars=max_chars)
+    if path.name == CONFIG_FILE_NAME:
+        text = _mask_api_key(text)
+    return text
+
+
 class ReadFileTool:
     """读取数据目录内的文件（落盘结果 / trace / 会话 / 日志），支持按行分页。"""
 
@@ -108,17 +137,14 @@ class ReadFileTool:
         唯一的非规范入口是老会话里的旧引用（`<run_id>/<文件名>`，相对
         artifacts 子目录）——交给 store 兜底，对模型不可见，仅作过渡。
         """
-        root = self._data_root.resolve()
-        # 先归一化再进围栏：绝对路径若恰好落在目录内也放行
-        resolved = (root / raw).resolve()
-
         try:
-            resolved.relative_to(root)
-        except ValueError:
+            # 先归一化再进围栏：绝对路径若恰好落在目录内也放行
+            resolved = resolve_in_data_root(raw, self._data_root)
+        except ArtifactError:
             # 围栏拒绝：明确边界 + 给出路。目录外的读取将来走审批通道，现在没有
             # 这条路，所以如实地告诉模型"做不到"。
             return (
-                f"拒绝访问 `{raw}`：只能读取数据目录 {root} 内的文件"
+                f"拒绝访问 `{raw}`：只能读取数据目录 {self._data_root.resolve()} 内的文件"
                 "（程序自己生成的 trace / 会话 / 落盘结果 / 日志）。\n"
                 "目录之外的文件需要用户逐次确认，该能力尚未实现——"
                 "请直接说明做不到，不要换路径重试。\n"
@@ -211,4 +237,4 @@ def _as_int(value: Any, *, default: int, low: int, high: int) -> int:
     return max(low, min(high, number))
 
 
-__all__ = ["READ_FILE_TOOL_NAME", "ReadFileTool"]
+__all__ = ["READ_FILE_TOOL_NAME", "ReadFileTool", "read_display_text", "resolve_in_data_root"]
