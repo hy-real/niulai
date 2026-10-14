@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,11 +66,32 @@ class ArtifactStore:
         self._root.mkdir(parents=True, exist_ok=True)
         return self._root
 
+    def dir_for(self, run_id: str) -> Path:
+        """某个 run 的落盘目录。save 与删除共用这一套命名 —— 映射只有一份。"""
+        return self.root / _slug(run_id or "shared")
+
+    def remove_run(self, run_id: str) -> bool:
+        """删掉某个 run 的全部落盘（删会话时按 run 清单逐个调）。
+
+        空 run_id 拒删：save 里空 id 落到 "shared" 目录，那不属于任何
+        会话，别顺走别人的数据。返回是否删干净了。
+        """
+        if not (run_id or "").strip():
+            return False
+        root = self.root.resolve()
+        folder = self.dir_for(run_id).resolve()
+        try:
+            folder.relative_to(root)
+        except ValueError:
+            return False
+        shutil.rmtree(folder, ignore_errors=True)
+        return not folder.exists()
+
     # ---------------------------------------------------------------- 写
 
     def save(self, content: str, *, name: str = "result", run_id: str = "shared") -> Artifact:
         """落盘一份内容，返回可被 `read_file` 引用的 Artifact。"""
-        folder = self.root / _slug(run_id or "shared")
+        folder = self.dir_for(run_id)
         folder.mkdir(parents=True, exist_ok=True)
 
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:8]

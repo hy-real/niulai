@@ -205,3 +205,37 @@ def test_会话id不接受任意路径(tmp_path):
         store.load("../secret")       # 相对穿越
     with pytest.raises(SessionError):
         store.load("")                # 空串
+
+
+def test_删除会话连同消息(tmp_path):
+    """messages 走外键级联：会话行没了，历史不能留在库里当孤儿。"""
+    store = _store(tmp_path)
+    session = store.create()
+    session.messages = [
+        Message(role="user", content="你好"),
+        Message(role="assistant", content="你好呀"),
+    ]
+    store.save(session)
+
+    assert store.delete(session.id) == session.id
+
+    with pytest.raises(SessionError):
+        store.load(session.id)
+    assert store.list_ids() == []
+    with closing(sqlite3.connect(store.path)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+
+
+def test_删除不存在的会话报错(tmp_path):
+    store = _store(tmp_path)
+    with pytest.raises(SessionError):
+        store.delete("不存在的id")
+
+
+def test_删除接受id前缀(tmp_path):
+    """围栏与 load 同一份：前缀定位，返回的一定是库内真实主键。"""
+    store = _store(tmp_path)
+    session = store.create()
+    store.save(session)
+    assert store.delete(session.id[:8]) == session.id
+    assert store.list_ids() == []

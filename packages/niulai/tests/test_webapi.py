@@ -11,13 +11,15 @@ import json
 import os
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
+from niulai.artifacts import ArtifactStore
 from niulai.config import read_config_file
-from niulai.llm.types import Message
+from niulai.llm.types import Message, Usage
 from niulai.paths import trace_dir
 from niulai.permissions import Approval, PermissionRequest
-from niulai.session import SessionStore
+from niulai.session import SessionError, SessionStore
 from niulai.webapi import WebApprovalChannel, create_app
 
 
@@ -459,6 +461,86 @@ def test_已收尾的run_不算中断(monkeypatch, tmp_path):
     assert client.get(f"/api/sessions/{sid}/interrupted").json() == {"interrupted": False}
     resp = client.post(f"/api/sessions/{sid}/resume")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------- 删除会话端点
+
+
+def test_删除会话端点_连同产出目录一起删(monkeypatch, tmp_path):
+    """三处都要干净：库内行、sessions/<id>/、artifacts/<run_id>/。
+    别人的 run 的落盘不碰。"""
+    monkeypatch.setenv("NIULAI_HOME", str(tmp_path))
+    client = _client(monkeypatch, tmp_path)
+    store = SessionStore()
+    session = store.create()
+    session.title = "茅台"
+    session.messages = [Message(role="user", content="茅台多少钱")]
+    session.note_run("20261007T220134-8c0d", Usage(1, 1, 2))
+    store.save(session)
+
+    folder = tmp_path / "sessions" / session.id
+    folder.mkdir(parents=True)
+    (folder / "报告.md").write_text("# 报告", encoding="utf-8")
+    artifacts = ArtifactStore()
+    artifacts.save("x" * 5000, name="stock_kline", run_id="20261007T220134-8c0d")
+    artifacts.save("别人的", name="x", run_id="run-other-9999")
+
+    resp = client.delete(f"/api/sessions/{session.id}")
+
+    assert resp.status_code == 200
+    assert resp.json()["id"] == session.id
+    assert not folder.exists()
+    assert not (tmp_path / "artifacts" / "20261007T220134-8c0d").exists()
+    assert (tmp_path / "artifacts" / "run-other-9999").exists()
+    with pytest.raises(SessionError):
+        store.load(session.id)
+    assert client.get("/api/sessions").json() == []
+
+
+def test_删除会话端点_异常终止run的落盘也删(monkeypatch, tmp_path):
+    """异常终止的 run 不调 note_run（连消息都不落库），姓名只在 trace 里 ——
+    它的大结果落盘是实打实占磁盘的，删会话照样要认领。"""
+    monkeypatch.setenv("NIULAI_HOME", str(tmp_path))
+    client = _client(monkeypatch, tmp_path)
+    store = SessionStore()
+    sid = _make_session(store)
+
+    d = trace_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "20261014T090000-dead.jsonl").write_text(
+        json.dumps({"type": "run_start", "run_id": "20261014T090000-dead",
+                    "session_id": sid, "task": "查茅台"}, ensure_ascii=False) + "\n",
+        encoding="utf-8")
+    ArtifactStore().save("x" * 5000, name="stock_kline", run_id="20261014T090000-dead")
+
+    assert client.delete(f"/api/sessions/{sid}").status_code == 200
+
+    assert not (tmp_path / "artifacts" / "20261014T090000-dead").exists()
+
+
+def test_删除会话端点_不存在返回404(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    assert client.delete("/api/sessions/不存在的id").status_code == 404
+
+
+def test_删除会话端点_运行中拒绝(monkeypatch, tmp_path):
+    """run 收尾会把 transcript 写回库里（INSERT OR REPLACE），删了也会被
+    复活，还会留下没有主人的内存会话 —— 先挡下，要删先停止。"""
+    from niulai.webapi import _RUNS
+
+    monkeypatch.setenv("NIULAI_HOME", str(tmp_path))
+    client = _client(monkeypatch, tmp_path)
+    store = SessionStore()
+    sid = _make_session(store)
+
+    assert _RUNS.reserve(sid, "run-x")
+    resp = client.delete(f"/api/sessions/{sid}")
+    assert resp.status_code == 409
+    assert "正在运行" in resp.json()["detail"]
+    assert store.list_ids()                      # 没删掉
+    _RUNS.finish("run-x")
+
+    assert client.delete(f"/api/sessions/{sid}").status_code == 200  # run 结束后即可删
 
 
 def test_中断后又跑完过新run_残留过期(monkeypatch, tmp_path):

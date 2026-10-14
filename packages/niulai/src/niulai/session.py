@@ -154,6 +154,19 @@ class SessionStore:
         items = self.list_ids(limit=1)
         return self.load(items[0].id) if items else None
 
+    def delete(self, session_id: str) -> str:
+        """删除会话（messages 随外键级联删除）。返回库内真实 id。
+
+        id 同样过 _resolve：删除也接受前缀，且返回值一定是库内已存在的
+        主键 —— 围栏与 load 同一份，不存在"按路径删任意文件"的可能。
+        """
+        sid = self._resolve(session_id)
+        with closing(self._connect()) as conn, conn:
+            cur = conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+        if not cur.rowcount:  # _resolve 之后理论上不会走到；真删空了说明并发竞争
+            raise SessionError(f"找不到会话：{session_id}（库 {self._db.name}）")
+        return sid
+
     # ------------------------------------------------------------- 内部
 
     def _connect(self) -> sqlite3.Connection:

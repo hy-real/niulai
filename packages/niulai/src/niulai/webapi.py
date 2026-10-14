@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -36,7 +37,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .agent.loop import _repair_transcript
-from .artifacts import ArtifactError
+from .artifacts import ArtifactError, ArtifactStore
 from .cli import Assembly, _assemble
 from .config import Settings, read_ths_api_key
 from .datasource.base import Capability
@@ -148,6 +149,10 @@ class _RunRegistry:
         entry = self._by_run.get(run_id)
         return entry[1] if entry else None
 
+    def is_running(self, session_id: str) -> bool:
+        """该会话是否还有进行中的 run（删除会话前必须先问它）。"""
+        return session_id in self._by_session
+
 
 _RUNS = _RunRegistry()
 # SessionStore 在 create_app() 里创建（而不是模块级）：
@@ -179,6 +184,51 @@ def _find_interrupted_journal(session_id: str) -> tuple[Path, dict[str, Any]] | 
             return None
         return path, head
     return None
+
+
+def _remove_session_dir(session_id: str) -> None:
+    """删掉会话产出目录（sessions/<id>/）—— 会话没了，报告不该成孤儿。
+
+    围栏与文件面板的列表端点同一份（resolve 后必须还在数据根内）；
+    Windows 上文件可能被别的程序占着，删不掉也不阻塞会话删除本身。
+    """
+    root = data_dir().resolve()
+    folder = root / "sessions" / session_id
+    try:
+        folder.resolve().relative_to(root)
+    except ValueError:
+        return
+    shutil.rmtree(folder, ignore_errors=True)
+
+
+def _session_run_ids(session_id: str) -> set[str]:
+    """这个会话跑过的所有 run_id：库里的 runs + trace 里登记过的。
+
+    库里的 runs 只记**正常收尾**的 run（异常终止的不调 note_run，
+    消息都不落库），而崩溃 run 的大结果落盘是实打实占着磁盘的 ——
+    它的姓名只在 trace 的 run_start 行里留得下。删会话要删干净，
+    两边都得认；run_id 回退到文件名 stem，与 load_transcript 同一约定。
+    """
+    ids: set[str] = set()
+    d = trace_dir()
+    if not d.is_dir():
+        return ids
+    for path in d.glob("*.jsonl"):
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                head = json.loads(fh.readline())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if head.get("session_id") == session_id:
+            ids.add(str(head.get("run_id") or path.stem))
+    return ids
+
+
+def _remove_session_artifacts(run_ids: set[str]) -> None:
+    """删掉这些 run 的大结果落盘（artifacts/<run_id>/）—— 数据不该比会话活得久。"""
+    artifacts = ArtifactStore()
+    for run_id in run_ids:
+        artifacts.remove_run(run_id)
 
 
 class RunRequest(BaseModel):
@@ -403,6 +453,30 @@ def create_app() -> FastAPI:
             "repaired": repaired,
             "messages": _history_view(session.messages),
         }
+
+    @app.delete("/api/sessions/{session_id}")
+    def api_delete_session(session_id: str):
+        """删除会话（侧栏的删除按钮）：库内行 + sessions/<id>/ + 各 run 的落盘。
+
+        进行中的 run 拒绝删除（409）：run 收尾时会把整段 transcript 重新
+        写回库里（INSERT OR REPLACE），删掉的行会被"复活"，还会留下一个
+        没有主人的内存会话 —— 要删先停止。
+        """
+        try:
+            session = store.load(session_id)
+        except SessionError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if _RUNS.is_running(session.id):
+            raise HTTPException(
+                status_code=409, detail="该会话有正在运行的任务，先停止或等它结束再删除"
+            )
+        # run_id 清单要先于 store.delete 收集：session.runs 来自加载出来的对象，
+        # 删库之后再读就没了。trace 兜底异常终止的 run（不进 session.runs）。
+        run_ids = _session_run_ids(session.id) | set(session.runs)
+        store.delete(session.id)
+        _remove_session_dir(session.id)
+        _remove_session_artifacts(run_ids)
+        return {"ok": True, "id": session.id}
 
     @app.get("/api/config")
     def api_get_config():

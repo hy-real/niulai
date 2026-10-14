@@ -140,3 +140,28 @@ def test_描述里带规模(store):
     artifact = store.save("a,b\n1,2\n3,4", name="x", run_id="run1")
     assert "字符" in artifact.describe()
     assert "行" in artifact.describe()
+
+
+# ---------------------------------------------------------------------- 删
+
+
+def test_按run删除落盘(store):
+    """删会话时按 run 清单清 artifacts/<run_id>/：映射与 save 同一套命名。"""
+    store.save("data", name="x", run_id="run1")
+    store.save("other", name="y", run_id="run2")
+
+    assert store.remove_run("run1") is True
+    assert not (store.root / "run1").exists()
+    assert (store.root / "run2").exists()      # 别人的 run 不碰
+
+
+def test_删不存在的run不报错(store):
+    assert store.remove_run("没落过盘的run") is True
+
+
+def test_空run_id拒删_不顺走shared(store):
+    """save 里空 id 落到 "shared"（不属于任何会话）—— 删别认领它。"""
+    store.save("shared data", name="x", run_id="")
+
+    assert store.remove_run("") is False
+    assert (store.root / "shared").exists()

@@ -51,12 +51,20 @@
                     transition:background .15s, border-color .15s; }
   .sidebtn button:hover { background:var(--panel2); border-color:var(--border2); }
   #sessions { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:2px; padding:2px; }
-  .sess { padding:8px 10px; cursor:pointer; border-radius:9px; }
+  .sess { padding:8px 10px; cursor:pointer; border-radius:9px; position:relative; padding-right:30px; }
   .sess:hover { background:var(--panel2); }
   .sess.active { background:var(--panel2); }
   .sess.active .t { font-weight:600; }
   .sess .t { font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .sess .m { font-size:11px; color:var(--muted); }
+  /* 删除按钮：平时隐身，hover 整行才出现 —— 不占列表的常规注意力 */
+  .sess .sdel { position:absolute; right:5px; top:50%; transform:translateY(-50%);
+                border:0; background:transparent; color:var(--muted); cursor:pointer;
+                border-radius:6px; padding:2px 7px; font:12px/1.4 var(--sans);
+                opacity:0; transition:opacity .15s, color .15s; }
+  .sess:hover .sdel { opacity:1; }
+  .sess .sdel:hover { color:var(--up); background:var(--panel); }
+  .sess .sdel:disabled { opacity:0; cursor:default; }
   .sidefoot { font-size:11px; color:var(--dim); padding:0 10px; }
 
   /* ---------- 侧栏拖宽把手 ---------- */
@@ -503,7 +511,28 @@ function sessionRow(s) {
     + (s.turns || 0) + ' 问 · ' + (s.total_tokens || 0).toLocaleString() + ' tk';
   d.appendChild(t); d.appendChild(m);
   d.addEventListener('click', () => openSession(s.id));
+  const del = document.createElement('button');
+  del.type = 'button'; del.className = 'sdel'; del.textContent = '✕';
+  const running = busySet.has(s.id);
+  del.title = running ? '任务进行中，无法删除' : '删除会话';
+  del.disabled = running;
+  del.addEventListener('click', e => { e.stopPropagation(); deleteSession(s, d); });
+  d.appendChild(del);
   return d;
+}
+
+function deleteSession(s, rowEl) {
+  if (busySet.has(s.id)) return;   // 有 run 在跑：服务端也会 409，前端先挡一道
+  if (!confirm('删除会话「' + s.title + '」？\n删除后不可恢复：会话记录、产出文件与大结果落盘（artifacts）都会一起删除。')) return;
+  fetch('/api/sessions/' + encodeURIComponent(s.id), { method: 'DELETE' })
+    .then(r => r.json().then(j => ({ ok: r.ok, j })))
+    .then(({ ok, j }) => {
+      if (!ok) { alert('删除失败：' + (j.detail || '未知错误')); return; }
+      rowEl.remove();
+      // 删的正是当前会话：回到"新会话"态（等同点侧栏的 ＋新会话）
+      if (s.id === activeId) document.getElementById('newChat').click();
+    })
+    .catch(() => alert('删除失败：网络错误'));
 }
 
 function loadSessions(reset = true) {
